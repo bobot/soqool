@@ -293,7 +293,7 @@ module MkTable(X:sig val name:string val version:int end) = struct
                  sql_of_t = Int63.to_string;
                  t_of_sql = Int63.of_string;
                };
-        name = "id"; index = !index; constraints = []
+        name = "id"; index = 0; constraints = []
       }
       and table =  {
         name = X.name;
@@ -370,7 +370,7 @@ let drop_table conn ?(if_exists=true) table =
     (fun _ -> Deferred.unit)
 
 let get column row =
-  column.ty.t_of_sql (row.result#getvalue row.index column.index)
+  column.ty.t_of_sql (row.result#getvalue row.index (row.offset + column.index))
 
 let add_row = (|>)
 

@@ -53,23 +53,24 @@ let same_name name conn () =
   let l = Result.ok_exn res in
   Deferred.return l
 
-
 let print_names l =
   printf "print_names:\n";
   List.iter l ~f:(fun (res1,res2) ->
-      assert (String.equal (get Author.name res1) (get Author.name res1));
-      printf "%s: %s --- %s\n"
+      assert (String.equal (get Author.name res1) (get Author.name res2));
+      printf "%s: %s(%s) --- %s(%s)\n"
         (get Author.name res1)
-        (get Author.firstname res1) (get Author.firstname res2));
+        (get Author.firstname res1) (Id.to_string (get Author.id res1))
+        (get Author.firstname res2) (Id.to_string (get Author.id res2)));
   Deferred.unit
 
-let () =
+let main () =
   don't_wait_for (
-  create_conn () >>= fun conn ->
-  populate conn >>=
-  same_name "foo" conn >>=
-  print_names >>= fun () ->
-  Table.drop_table conn Author.t >>= fun res ->
-  let () = Result.ok_exn res in
-  Shutdown.exit 0);
-  never_returns (Scheduler.go ())
+    create_conn () >>= fun conn ->
+    populate conn >>=
+    same_name "foo" conn >>=
+    print_names >>= fun () ->
+    Table.drop_table conn Author.t >>= fun res ->
+    let () = Result.ok_exn res in
+    Shutdown.exit 0)
+
+let () = never_returns (Scheduler.go_main ~main ())
