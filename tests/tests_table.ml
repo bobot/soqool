@@ -44,7 +44,9 @@ let same_name =
     ~from:From.(Author.t @ Author.t @ e)
     ~param:Params.(Ty.string @ e)
     SQL.(fun author1 author2 name ->
-        author1.(Author.name) = name && author2.(Author.name) = name,
+        author1.(Author.name) = name &&
+        author2.(Author.name) = name &&
+        author1.(Author.id) < author2.(Author.id),
         result2 author1 author2)
 
 let same_name name conn () =

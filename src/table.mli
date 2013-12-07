@@ -151,8 +151,23 @@ module SQL: sig
     val get: 'table from -> ('a,'table) column -> 'a term
   end
 
+  (** comparison operator are implemented for all relevant datatype
+      (I don't know what relevant means)
+      Warning it is the comparison operator of posgresql.
+      It must be the same than ocaml for predefined type in Ty.
+      But certainly not for the one created with Ty.from_sexp
+  *)
   val (=): 'a term -> 'a term -> formula
+  val (<): 'a term -> 'a term -> formula
+  val (>): 'a term -> 'a term -> formula
+  val (<=): 'a term -> 'a term -> formula
+  val (>=): 'a term -> 'a term -> formula
+  val (<>): 'a term -> 'a term -> formula
+
+
   val (&&): formula -> formula -> formula
+  val (||): formula -> formula -> formula
+  val not: formula -> formula
 
   type 'r result
 

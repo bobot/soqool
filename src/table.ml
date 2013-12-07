@@ -383,21 +383,41 @@ module SQL = struct
     | Get: 'table from * ('a,'table) column -> 'a term
     | Param: 'a Ty.t * int -> 'a term
 
+  type rel = Eq | Lt | Le | Gt | Ge | Di
+
   type formula =
     | And: formula * formula -> formula
-    | Equal: 'a term * 'a term -> formula
+    | Or: formula * formula -> formula
+    | Not: formula -> formula
+    | Rel: rel * 'a term * 'a term -> formula
 
   module Array = struct
     let get: 'table from -> ('a,'table) column -> 'a term =
       fun from col -> Get(from,col)
   end
 
-  let (=) t1 t2 = Equal(t1,t2)
+  let (=)  t1 t2 = Rel(Eq,t1,t2)
+  let (<)  t1 t2 = Rel(Lt,t1,t2)
+  let (<=) t1 t2 = Rel(Le,t1,t2)
+  let (>)  t1 t2 = Rel(Gt,t1,t2)
+  let (>=) t1 t2 = Rel(Ge,t1,t2)
+  let (<>) t1 t2 = Rel(Di,t1,t2)
+
   let (&&) f1 f2 = And(f1,f2)
+  let (||) f1 f2 = Or(f1,f2)
+  let (not) f1 = Not f1
 
   type _ result =
     | Row1: 'table from -> ('table row) result
     | Row2: 'table1 from * 'table2 from -> ('table1 row * 'table2 row) result
+
+  let string_of_rel = function
+    | Eq -> "="
+    | Lt -> "<"
+    | Le -> "<="
+    | Gt -> ">"
+    | Ge -> ">="
+    | Di -> "<>"
 
   let sql_result: type r. Buffer.t -> r result -> unit = fun b result ->
     let rec aux i b = function
@@ -415,8 +435,13 @@ module SQL = struct
       | Param(_,i) -> Printf.bprintf b "$%i" (i+1) in
     let rec sql_formula b = function
       | And(f1,f2) ->
-        Printf.bprintf b "(%a) and (%a)" sql_formula f1 sql_formula f2
-      | Equal(t1,t2) -> Printf.bprintf b "%a = %a" sql_term t1 sql_term t2 in
+        Printf.bprintf b "(%a and %a)" sql_formula f1 sql_formula f2
+      | Or(f1,f2) ->
+        Printf.bprintf b "(%a or %a)" sql_formula f1 sql_formula f2
+      | Not f1->
+        Printf.bprintf b "(not %a)" sql_formula f1
+      | Rel(rel,t1,t2) -> Printf.bprintf b "%a %s %a"
+                            sql_term t1 (string_of_rel rel) sql_term t2 in
     sql_formula b formula
 
   let result1 t = Row1(t)
