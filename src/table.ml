@@ -57,6 +57,7 @@ module Connection : sig
   type t
 
   val create:
+    ?verbose:bool ->
     ?host : string ->        (** Default: none *)
     ?hostaddr : string ->    (** Default: none *)
     ?port : string  ->       (** Default: none *)
@@ -71,11 +72,14 @@ module Connection : sig
 
   val close: t -> (unit,exn) Result.t Deferred.t
 
-  val in_thread:
+  val exec:
     t ->
-    (Postgresql.connection -> 'a) ->
-    ('a -> 'b Deferred.t) ->
-    ('b, exn) Result.t Deferred.t
+    ?expect : Postgresql.result_status list ->
+    ?params : string array ->
+    ?binary_params : bool array -> string ->
+    (Postgresql.result -> 'a Async_core.Deferred.t) ->
+    ('a, exn) Core.Std.Result.t Async_core.Deferred.t
+
 end
  = struct
   type t = {
@@ -83,6 +87,7 @@ end
     (** libpq need not all the communication to be done with the same thread
         but the call can't be interleaved *)
     thread: In_thread.Helper_thread.t;
+    verbose:bool;
   }
 
 
@@ -92,6 +97,7 @@ end
         >>= handle)
 
   let create
+    ?(verbose=false)
       ?host ?hostaddr ?port ?dbname ?user ?password ?options ?tty
       ?requiressl ?conninfo
       () =
@@ -104,7 +110,9 @@ end
         ?host ?hostaddr ?port ?dbname ?user ?password ?options ?tty
         ?requiressl ?conninfo
         ())
-      (fun db -> Deferred.return { db; thread })
+      (fun db ->
+         if not verbose then db#set_notice_processor (fun _ -> ());
+         Deferred.return { db; thread; verbose })
 
 
   let in_thread conn call handle =
@@ -114,6 +122,18 @@ end
           ~name:"Table.db.connection" (fun () -> call conn.db)
         >>= handle)
 
+  let exec conn ?expect ?params ?binary_params request f =
+    if conn.verbose then begin
+      eprintf "Scheduled: exec: %s\n" request;
+      Option.iter ~f:(Array.iteri
+                        ~f:(fun i s -> eprintf "           $%i:%s\n" (i+1) s))
+                        params
+    end;
+    in_thread conn (fun db ->
+        db#exec ?expect ?params ?binary_params request)
+      f
+
+
 
   let close t =
     in_thread t
@@ -122,7 +142,18 @@ end
 
 end
 
-type 'rt id = Int63.t (** serial type *)
+module Id :  sig
+  type 'table t = Int63.t
+  val hash: 'table t -> int
+  val compare: 'table t -> 'table t -> int
+  val to_string: 'table t -> string
+end = struct
+  type 'table t = Int63.t
+  let hash = Int63.hash
+  let compare = Int63.compare
+  let to_string = Int63.to_string
+end
+type 'rt id = 'rt Id.t (** serial type *)
 
 type col_constr = UNIQUE
 
@@ -149,7 +180,8 @@ and ('a,'rt) column = {
 
 and 'rt row = {
   result: Postgresql.result;
-  index: int;
+  index: int;  (** tuple index *)
+  offset: int; (** first field *)
 }
 
 and 'a kind =
@@ -162,6 +194,9 @@ and 'a ty = {
   t_of_sql: string -> 'a;
 }
 
+let rec nbcolumns acc = function
+  | Nil -> acc
+  | Cons(_,l) -> nbcolumns (acc+1) l
 
 module Ty = struct
 
@@ -209,12 +244,14 @@ end
 
 exception Already_closed_table of string * int with sexp
 
+let table_name table = table.name ^ "_" ^ (Int.to_string table.version)
+
 module MkTable(X:sig val name:string val version:int end) = struct
   type t
 
-  type 'add uc =
-    | Nil : t id exn_ret_defer uc
-    | Cons : 'a ty * 'add uc -> ('a -> 'add) uc
+  type ('add,'res) uc =
+    | Nil: ('add,'add) uc
+    | Cons: 'a ty * ('add,'a -> 'res)  uc -> ('add,'res) uc
 
   let uc = Nil
 
@@ -229,9 +266,28 @@ module MkTable(X:sig val name:string val version:int end) = struct
     columns := Cons(col,!columns);
     col, Cons(ty,uc)
 
-  let close: type add. add uc -> t table * add adder * (t id,t) column =
+  let rec rev_columns acc : 'a columns -> 'a columns = function
+    | Nil -> acc
+    | Cons(col,l) -> rev_columns (Cons(col,acc)) l
+
+  let sql_insert table columns =
+    let rec aux b : 'a columns -> unit = function
+      | Nil -> ()
+      | Cons (col,Nil) ->
+        Printf.bprintf b "$%i" col.index
+      | Cons (col,l) ->
+        Printf.bprintf b "$%i," col.index;
+        aux b l in
+    let b  = Buffer.create 70 in
+    Printf.bprintf b "INSERT INTO %s VALUES (DEFAULT,%a) RETURNING id;"
+      (table_name table) aux columns;
+    Buffer.contents b
+
+  let close: type add.
+    (add, (t id) exn_ret_defer) uc -> t table * add adder * (t id,t) column =
     fun  uc ->
-      index := -2;
+      let columns = rev_columns Nil !columns in
+      let len = !index in
       let rec id = {
         ty   = { kind = Foreign_key table;
                  sql_of_t = Int63.to_string;
@@ -242,61 +298,81 @@ module MkTable(X:sig val name:string val version:int end) = struct
       and table =  {
         name = X.name;
         version = X.version;
-        columns = Cons(id,!columns);
+        columns = Cons(id, columns);
       } in
-      let rec gen_adder: type add. add uc -> Buffer.t -> int ->
-        (Connection.t -> string Array.t -> add) = fun uc b i ->
+      let rec gen_adder: type add res.
+        (add,res) uc -> int -> (** index *)
+        (Connection.t -> string Array.t -> res) ->
+        (Connection.t -> string Array.t -> add)
+        = fun uc i exec ->
         match uc with
-        | Nil ->
-          Buffer.add_string b ") RETURNING id;";
-          let request = Buffer.contents b in
-          fun conn array ->
-            Connection.in_thread conn (fun db ->
-                db#exec
-                  ~expect:[Postgresql.Tuples_ok]
-                  ~params:array
-                  request)
-              (fun result ->
-                 assert (result#ntuples = 1);
-                 assert (result#nfields = 1);
-                 Deferred.return (Int63.of_string (result#getvalue 0 0))
-              )
+        | Nil -> exec
         | Cons(ty,l) ->
-          Printf.bprintf b "$%i%s" i
-            (match l with Nil -> "" | Cons _ -> ", ");
-          let call = gen_adder l b (i+1) in
-          fun conn array -> fun x ->
+          let exec conn array x =
             array.(i) <- ty.sql_of_t x;
-            call conn array
+            exec conn array
+          in
+          gen_adder l (i-1) exec
       in
-      let call =
-        let b = Buffer.create 20 in
-        Printf.bprintf b "INSERT INTO %s VALUES (" X.name;
-        gen_adder uc b 0 in
-      let adder = (fun conn -> call conn (Array.create ~len:!index "")) in
-      table, adder, id
+      let request = sql_insert table columns in
+      let exec conn array =
+        Connection.exec
+          conn
+          ~expect:[Postgresql.Tuples_ok]
+          ~params:array
+          request
+          (fun result ->
+             assert (result#ntuples = 1);
+             assert (result#nfields = 1);
+             Deferred.return (Int63.of_string (result#getvalue 0 0))
+            )
+      in
+      let exec = gen_adder uc (len-1) exec in
+      let exec conn = exec conn (Array.create ~len "") in
+      index := -2;
+      table, exec, id
 end
 
-let table_name table = table.name ^ "_" ^ (Int.to_string table.version)
+let create_table conn ?(if_not_exists=true) table =
+  let rec sql_columns b : 'table columns -> unit = function
+    | Nil -> ()
+    | Cons(col,l) ->
+      Buffer.add_string b col.name;
+      Buffer.add_char b ' ';
+      begin
+        match col.ty.kind with
+        | Data ftype ->
+          Buffer.add_string b (Postgresql.string_of_ftype ftype)
+        | Foreign_key table' when phys_same table table' -> (** primary key *)
+          Buffer.add_string b "SERIAL PRIMARY KEY"
+        | Foreign_key table' ->
+          Printf.bprintf b "int4 REFERENCES %s(id)" (table_name table')
+      end;
+      if not (phys_equal l Nil) then Buffer.add_string b ",\n";
+      sql_columns b l
+  in
+  let b = Buffer.create 100 in
+  Printf.bprintf b "CREATE TABLE%s%s (%a);"
+    (if if_not_exists then " IF NOT EXISTS " else "")
+    (table_name table)
+    sql_columns table.columns;
+  let request = Buffer.contents b in
+  Connection.exec conn ~expect:[Postgresql.Command_ok] request
+    (fun _ -> Deferred.unit)
 
-let create_table conn table =
-  assert false (** TODO *)
-
-let table_exists = assert false (** TODO *)
+let drop_table conn ?(if_exists=true) table =
+  let b = Buffer.create 30 in
+  Printf.bprintf b "DROP TABLE%s%s;"
+    (if if_exists then " IF EXISTS " else "")
+    (table_name table);
+  let request = Buffer.contents b in
+  Connection.exec conn ~expect:[Postgresql.Command_ok] request
+    (fun _ -> Deferred.unit)
 
 let get column row =
   column.ty.t_of_sql (row.result#getvalue row.index column.index)
 
 let add_row = (|>)
-
-(*
-let create_table conn table =
-  let print_columns fmt = function
-    | Nil -> ()
-    | Cons(col,l) -> assert false (** TODO *) in
-  Format.sprintf
-  "CREATE TABLE $1(@\n%a@\n);"
-*)
 
 module SQL = struct
 
@@ -336,7 +412,7 @@ module SQL = struct
   let sql_where b formula =
     let sql_term b = function
       | Get(From(_,i),col) -> Printf.bprintf b "t%i.%s" i col.name
-      | Param(_,i) -> Printf.bprintf b "$%i" i in
+      | Param(_,i) -> Printf.bprintf b "$%i" (i+1) in
     let rec sql_formula b = function
       | And(f1,f2) ->
         Printf.bprintf b "(%a) and (%a)" sql_formula f1 sql_formula f2
@@ -385,9 +461,21 @@ let compute_request : Buffer.t -> SQL.formula -> 'r SQL.result -> string =
       SQL.sql_where formula;
     Buffer.contents b
 
-let extract_result : 'r SQL.result -> Postgresql.result -> 'r list =
-  fun f r ->
-    assert false (** TODO *)
+let rec foldi f acc max min =
+  if min > max then acc else foldi f (f acc max) (max - 1) min
+
+let extract_result : type r. r SQL.result -> Postgresql.result -> r list =
+  fun spec result  ->
+    match spec with
+    | SQL.Row1 _ ->
+      foldi (fun acc index -> {result; index; offset = 0}::acc)
+        [] (result#ntuples - 1) 0
+    | SQL.Row2 (SQL.From (t1,_),_) ->
+      let nbt1 = nbcolumns 0 t1.columns in
+      foldi (fun acc index -> ({result; index; offset = 0},
+                               {result; index; offset = nbt1})::acc)
+        [] (result#ntuples - 1) 0
+
 
 let select: type params formula result.
   from:(params,formula) From.t ->
@@ -407,11 +495,12 @@ let select: type params formula result.
       let where, result = formula in
       let request = compute_request bfrom where result in
       fun conn array ->
-        Connection.in_thread conn (fun db ->
-            db#exec
-              ~expect:[Postgresql.Tuples_ok]
-              ~params:array request)
-          (fun res -> Deferred.return (extract_result result res))
+        Connection.exec conn
+          ~expect:[Postgresql.Tuples_ok]
+          ~params:array
+          request
+          (fun res ->
+            Deferred.return (extract_result result res))
     | Params.Cons(ty,params) ->
       let call =
         doparam bfrom params (iparam+1) (formula (SQL.Param(ty,iparam))) in
@@ -439,7 +528,7 @@ let select: type params formula result.
       | From.Cons(table,from) ->
         Printf.bprintf bfrom "%s as t%i%s" (table_name table) ifrom
           (match from with From.Nil -> "" | From.Cons _ -> ", ");
-        dofrom from bfrom ifrom params (formula (SQL.From (table,ifrom)))
+        dofrom from bfrom (ifrom+1) params (formula (SQL.From (table,ifrom)))
   in
 
   fun ~from ~param formula ->

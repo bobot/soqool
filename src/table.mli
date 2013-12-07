@@ -28,6 +28,7 @@ module Connection: sig
   type t
 
   val create:
+    ?verbose:bool ->         (** default: false*)
     ?host : string ->        (** Default: none *)
     ?hostaddr : string ->    (** Default: none *)
     ?port : string  ->       (** Default: none *)
@@ -59,8 +60,15 @@ type 'table row
 (** A row can be added using *)
 type 'add adder
 
+
 (** The unique identifier of a row (SERIAL PRIMARY KEY of the table) *)
-type 'table id
+module Id: sig
+  type 'table t
+  val hash: 'table t -> int
+  val compare: 'table t -> 'table t -> int
+  val to_string: 'table t -> string
+end
+type 'table id = 'table Id.t
 
 type col_constr = UNIQUE
 
@@ -92,37 +100,44 @@ end
 module MkTable(X:sig val name:string val version:int end): sig
   type t
 
-  type 'add uc (** under connstruction *)
+  type ('add,'res) uc (** under connstruction *)
+    (** after close the shape of ['add] is
+        [ty1 -> ty2 -> ... ->  (t id) exn_ret_defer].
+        ['res] is just an internal way for adding applications at the end
+    *)
 
-  val uc: ((t id) exn_ret_defer) uc
+  val uc: ('res, 'res) uc
 
   val add_column:
     ?constraints: col_constr list -> (* default: [] *)
     name:string ->
     'a Ty.t ->
-    'add uc ->
-    ('a,t) column * ('a -> 'add) uc
+    ('add, 'a -> 'res) uc ->
+    ('a,t) column * ('add, 'res) uc
 
-  val close: 'add uc -> t table * 'add adder * (t id,t) column
+  val close:
+    ('add, (t id) exn_ret_defer) uc ->
+    t table * 'add adder * (t id,t) column
   (** No more column can be added  after calling this function.
       Return the table and the id column of the table *)
 end
 
-
-val table_exists:
-  Connection.t ->
-  _ table ->
-  bool exn_ret_defer
-
 val create_table:
   Connection.t ->
+  ?if_not_exists:bool ->   (** default true *)
+  _ table ->
+  unit exn_ret_defer
+
+val drop_table:
+  Connection.t ->
+  ?if_exists:bool ->
   _ table ->
   unit exn_ret_defer
 
 val add_row:
   Connection.t ->
   'add adder ->
-  'add
+  'add (** end by ('table id) exn_ret_defer *)
 
 val get: ('a,'table) column -> 'table row -> 'a
 

@@ -1,28 +1,38 @@
 
 
-PACKAGES=async fileutils core.syntax camlp4 bin_prot.syntax sexplib.syntax postgresql
+PACKAGES=async fileutils core.syntax camlp4 bin_prot.syntax sexplib.syntax postgresql csv
 # I don't understand warning 18
 OPTIONS=-tag annot -no-sanitize -tag debug -use-ocamlfind -cflags -w,+a-4-9-18-41-30-42-44 -cflags -warn-error,+5+10+8+12+20+11 -cflag -bin-annot -j 8 -tag thread -syntax camlp4o
 #OPTIONS += -cflags -warn-error,+a
-DIRECTORIES=src/common src/monitor src/conductor tests
+DIRECTORIES=src tests
 OCAMLBUILD=ocamlbuild \
 		 $(addprefix -package ,$(PACKAGES)) \
 		 $(OPTIONS)	\
 		 $(addprefix -I ,$(DIRECTORIES)) \
 
-.PHONY: tests monitor.native tests_table.native tests_table.byte
+.PHONY: tests monitor.native tests_table.native tests_table.byte tests_api tests
 
-all: monitor.native .merlin tests_table.native
+all: .merlin tests_table.native
 
-monitor.native tests_table.native:
-	$(OCAMLBUILD) src/monitor/monitor.native tests/tests_table.native
+tests_table.native:
+	$(OCAMLBUILD) tests/tests_table.native
 
-monitor.byte:
-	$(OCAMLBUILD) src/monitor/monitor.byte
+tests: tests/lahman2012/ tests_table.native
+	./tests_table.native
+
+tests_api:
+	$(OCAMLBUILD) tests/tests_table.cmo
 
 tests_table.byte:
 	$(OCAMLBUILD) tests/tests_table.byte
 
+tests/lahman2012-csv.zip:
+	wget "http://seanlahman.com/files/database/lahman2012-csv.zip" -O tests/lahman2012-csv.zip
+
+
+tests/lahman2012/: tests/lahman2012-csv.zip
+	mkdir -p $@
+	unzip tests/lahman2012-csv.zip -d $@
 
 #Because ocamlbuild doesn't give to ocamldoc the .ml when a .mli is present
 dep:
