@@ -51,8 +51,8 @@ end
     The row of the table represent a type 'r *)
 type 'table table
 
-(** It contains typed columns *)
-type ('a,'table) column
+(** It contains typed columns, ocaml type and postgresql type *)
+type ('a,'p,'table) column
 
 (** The result of a query: a raw of the table ['table] *)
 type 'table row
@@ -78,22 +78,25 @@ type 'a exn_ret_defer = ('a, exn) Result.t Deferred.t
 
 module Ty: sig
 
-  type 'a t
+  type ('a,'p) t
 
   module MkSexp (S:Sexpable.S): sig
-    val t: S.t t
+    val t: (S.t,[`SEXP]) t
   end
 
-  val from_sexp: ('a-> Sexp.t) -> (Sexp.t -> 'a) -> 'a t
+  val from_sexp: ('a-> Sexp.t) -> (Sexp.t -> 'a) -> ('a,[`SEXP]) t
 
-  val int: int t
-  val int32: Int32.t t
-  val int64: Int64.t t
-  val int63: Int63.t t
-  val string: string t
-  val float: float t
+  (** integral type *)
+  val int: (int,[`INT]) t
+  val int32: (Int32.t,[`INT]) t
+  val int64: (Int64.t,[`INT]) t
+  val int63: (Int63.t,[`INT]) t
+  val string: (string,[`TEXT]) t
 
-  val id: 'table table -> 'table id t
+  (** double precision *)
+  val float: (float,[`FLOAT]) t
+
+  val id: 'table table -> ('table id,[`ID]) t
 
 end
 
@@ -111,13 +114,13 @@ module MkTable(X:sig val name:string val version:int end): sig
   val add_column:
     ?constraints: col_constr list -> (* default: [] *)
     name:string ->
-    'a Ty.t ->
+    ('a,'p) Ty.t ->
     ('add, 'a -> 'res) uc ->
-    ('a,t) column * ('add, 'res) uc
+    ('a,'p,t) column * ('add, 'res) uc
 
   val close:
     ('add, (t id) exn_ret_defer) uc ->
-    t table * 'add adder * (t id,t) column
+    t table * 'add adder * (t id,[`ID],t) column
   (** No more column can be added  after calling this function.
       Return the table and the id column of the table *)
 end
@@ -139,7 +142,7 @@ val add_row:
   'add adder ->
   'add (** end by ('table id) exn_ret_defer *)
 
-val get: ('a,'table) column -> 'table row -> 'a
+val get: ('a,_,'table) column -> 'table row -> 'a
 
 module SQL: sig
 
@@ -148,7 +151,7 @@ module SQL: sig
   type formula
 
   module Array: sig
-    val get: 'table from -> ('a,'table) column -> 'a term
+    val get: 'table from -> ('a,'p,'table) column -> 'p term
   end
 
   (** comparison operator are implemented for all relevant datatype
@@ -157,12 +160,27 @@ module SQL: sig
       It must be the same than ocaml for predefined type in Ty.
       But certainly not for the one created with Ty.from_sexp
   *)
-  val (=): 'a term -> 'a term -> formula
-  val (<): 'a term -> 'a term -> formula
-  val (>): 'a term -> 'a term -> formula
-  val (<=): 'a term -> 'a term -> formula
-  val (>=): 'a term -> 'a term -> formula
-  val (<>): 'a term -> 'a term -> formula
+  val (=): 'p term -> 'p term -> formula
+  val (<): 'p term -> 'p term -> formula
+  val (>): 'p term -> 'p term -> formula
+  val (<=): 'p term -> 'p term -> formula
+  val (>=): 'p term -> 'p term -> formula
+  val (<>): 'p term -> 'p term -> formula
+
+  type 'a num = [< `INT | `FLOAT] as 'a
+  val (+): 'a num term -> 'a num term -> 'a num term
+  val (-): 'a num term -> 'a num term -> 'a num term
+  val ( * ): 'a num term -> 'a num term -> 'a num term
+  val (mod): 'a num term -> 'a num term -> 'a num term
+  val (/): 'a num term -> 'a num term -> 'a num term
+  val ( ** ): 'a num term -> 'a num term -> 'a num term
+
+  val (lor):  [`INT] term -> [`INT] term -> [`INT] term
+  val (land): [`INT] term -> [`INT] term -> [`INT] term
+  val (lxor): [`INT] term -> [`INT] term -> [`INT] term
+  val lnot: [`INT] term -> [`INT] term
+  val (lsl): [`INT] term -> [`INT] term -> [`INT] term
+  val (lsr): [`INT] term -> [`INT] term -> [`INT] term
 
 
   val (&&): formula -> formula -> formula
@@ -176,6 +194,11 @@ module SQL: sig
     'table1 from -> 'table2 from ->
     ('table1 row * 'table2 row) result
 
+  module Build: sig
+    val rel: string -> 'a term -> 'a term -> formula
+    val op2: string -> 'a term -> 'a term -> 'a term
+    val op1: string -> 'a term -> 'a term
+  end
 end
 
 module Params : sig
@@ -184,8 +207,8 @@ module Params : sig
   val e:
     (SQL.formula * 'r SQL.result, ('r list) exn_ret_defer) t
   val (@):
-    'a Ty.t -> ('params,'result) t ->
-    ('a SQL.term -> 'params,'a -> 'result) t
+    ('a,'p) Ty.t -> ('params,'result) t ->
+    ('p SQL.term -> 'params,'a -> 'result) t
 end
 
 module From : sig

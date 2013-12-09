@@ -169,10 +169,10 @@ and 'add adder = Connection.t -> 'add
 
 and 'rt columns =
   | Nil
-  | Cons: ('a,'rt) column * 'rt columns -> 'rt columns
+  | Cons: ('a,'p,'rt) column * 'rt columns -> 'rt columns
 
-and ('a,'rt) column = {
-  ty  : 'a ty;
+and ('a,'p,'rt) column = {
+  ty  : ('a,'p) ty;
   name: string;
   index: int;
   constraints: col_constr list;
@@ -188,7 +188,7 @@ and 'a kind =
   | Data: Postgresql.ftype -> 'a kind
   | Foreign_key: 'table table -> Int63.t kind (** or primary key *)
 
-and 'a ty = {
+and ('a,'p) ty = {
   kind: 'a kind;
   sql_of_t: 'a -> string;
   t_of_sql: string -> 'a;
@@ -200,7 +200,7 @@ let rec nbcolumns acc = function
 
 module Ty = struct
 
-  type 'a t = 'a ty
+  type ('a,'p) t = ('a,'p) ty
 
   (** TODO binary format *)
 
@@ -214,23 +214,23 @@ module Ty = struct
     let t = from_sexp S.sexp_of_t S.t_of_sexp
   end
 
-  let int32: Int32.t t = { kind = Data Postgresql.INT4;
+  let int32 = { kind = Data Postgresql.INT4;
                            sql_of_t = Int32.to_string;
                            t_of_sql = Int32.of_string }
-  let int64: Int64.t t = { kind = Data Postgresql.INT8;
+  let int64 = { kind = Data Postgresql.INT8;
                            sql_of_t = Int64.to_string;
                            t_of_sql = Int64.of_string }
-  let int63: Int63.t t = { kind = Data Postgresql.INT8;
+  let int63 = { kind = Data Postgresql.INT8;
                            sql_of_t = Int63.to_string;
                            t_of_sql = Int63.of_string }
-  let int: int t = { kind = Data Postgresql.INT8;
+  let int = { kind = Data Postgresql.INT8;
                      sql_of_t = Int.to_string;
                      t_of_sql = Int.of_string }
-  let string: string t = { kind = Data Postgresql.TEXT;
+  let string = { kind = Data Postgresql.TEXT;
                            sql_of_t = (fun x -> x);
                            t_of_sql = (fun x -> x)
                          }
-  let float: float t = { kind = Data Postgresql.FLOAT8;
+  let float = { kind = Data Postgresql.FLOAT8;
                          sql_of_t = Float.to_string;
                          t_of_sql = Float.of_string;
                        }
@@ -251,7 +251,7 @@ module MkTable(X:sig val name:string val version:int end) = struct
 
   type ('add,'res) uc =
     | Nil: ('add,'add) uc
-    | Cons: 'a ty * ('add,'a -> 'res)  uc -> ('add,'res) uc
+    | Cons: ('a,'p) ty * ('add,'a -> 'res)  uc -> ('add,'res) uc
 
   let uc = Nil
 
@@ -284,7 +284,8 @@ module MkTable(X:sig val name:string val version:int end) = struct
     Buffer.contents b
 
   let close: type add.
-    (add, (t id) exn_ret_defer) uc -> t table * add adder * (t id,t) column =
+    (add, (t id) exn_ret_defer) uc ->
+    t table * add adder * (t id,[`ID],t) column =
     fun  uc ->
       let columns = rev_columns Nil !columns in
       let len = !index in
@@ -379,11 +380,13 @@ module SQL = struct
   type 'table from =
     | From: 'table table * int -> 'table from
 
-  type 'a term =
-    | Get: 'table from * ('a,'table) column -> 'a term
-    | Param: 'a Ty.t * int -> 'a term
+  type rel = string
 
-  type rel = Eq | Lt | Le | Gt | Ge | Di
+  type 'p term =
+    | Get: 'table from * ('a,'p,'table) column -> 'p term
+    | Param: ('a,'p) Ty.t * int -> 'p term
+    | Op2: rel * 'a term * 'a term -> 'a term
+    | Op1: rel * 'a term -> 'a term
 
   type formula =
     | And: formula * formula -> formula
@@ -392,32 +395,15 @@ module SQL = struct
     | Rel: rel * 'a term * 'a term -> formula
 
   module Array = struct
-    let get: 'table from -> ('a,'table) column -> 'a term =
+    let get: 'table from -> ('a,'p,'table) column -> 'p term =
       fun from col -> Get(from,col)
   end
-
-  let (=)  t1 t2 = Rel(Eq,t1,t2)
-  let (<)  t1 t2 = Rel(Lt,t1,t2)
-  let (<=) t1 t2 = Rel(Le,t1,t2)
-  let (>)  t1 t2 = Rel(Gt,t1,t2)
-  let (>=) t1 t2 = Rel(Ge,t1,t2)
-  let (<>) t1 t2 = Rel(Di,t1,t2)
-
-  let (&&) f1 f2 = And(f1,f2)
-  let (||) f1 f2 = Or(f1,f2)
-  let (not) f1 = Not f1
 
   type _ result =
     | Row1: 'table from -> ('table row) result
     | Row2: 'table1 from * 'table2 from -> ('table1 row * 'table2 row) result
 
-  let string_of_rel = function
-    | Eq -> "="
-    | Lt -> "<"
-    | Le -> "<="
-    | Gt -> ">"
-    | Ge -> ">="
-    | Di -> "<>"
+  let string_of_rel x = x
 
   let sql_result: type r. Buffer.t -> r result -> unit = fun b result ->
     let rec aux i b = function
@@ -430,9 +416,12 @@ module SQL = struct
       aux i1 b t1.columns; Buffer.add_string b ", "; aux i2 b t2.columns
 
   let sql_where b formula =
-    let sql_term b = function
+    let rec sql_term b = function
       | Get(From(_,i),col) -> Printf.bprintf b "t%i.%s" i col.name
-      | Param(_,i) -> Printf.bprintf b "$%i" (i+1) in
+      | Param(_,i) -> Printf.bprintf b "$%i" (i+1)
+      | Op2(s,t1,t2) -> Printf.bprintf b "(%a %s %a)" sql_term t1 s sql_term t2
+      | Op1(s,t1) -> Printf.bprintf b "(%s %a)" s sql_term t1
+    in
     let rec sql_formula b = function
       | And(f1,f2) ->
         Printf.bprintf b "(%a and %a)" sql_formula f1 sql_formula f2
@@ -447,13 +436,46 @@ module SQL = struct
   let result1 t = Row1(t)
   let result2 t1 t2 = Row2(t1,t2)
 
+
+  let (=)  t1 t2 = Rel("=",t1,t2)
+  let (<)  t1 t2 = Rel("<",t1,t2)
+  let (<=) t1 t2 = Rel("<=",t1,t2)
+  let (>)  t1 t2 = Rel(">",t1,t2)
+  let (>=) t1 t2 = Rel(">=",t1,t2)
+  let (<>) t1 t2 = Rel("<>",t1,t2)
+
+  type 'a num = [< `INT | `FLOAT] as 'a
+  let (+) t1 t2 = Op2("+",t1,t2)
+  let (-) t1 t2 = Op2("-",t1,t2)
+  let ( * ) t1 t2 = Op2("*",t1,t2)
+  let ( ** ) t1 t2 = Op2("^",t1,t2)
+  let (mod) t1 t2 = Op2("%",t1,t2)
+  let (/) t1 t2 = Op2("/",t1,t2)
+
+  let (land) t1 t2 = Op2("&",t1,t2)
+  let (lor) t1 t2 = Op2("|",t1,t2)
+  let (lxor) t1 t2 = Op2("#",t1,t2)
+  let (lnot) t1 = Op1("|",t1)
+  let (lsl) t1 t2 = Op2("<<",t1,t2)
+  let (lsr) t1 t2 = Op2(">>",t1,t2)
+
+  let (&&) f1 f2 = And(f1,f2)
+  let (||) f1 f2 = Or(f1,f2)
+  let (not) f1 = Not f1
+
+  module Build = struct
+    let rel s t1 t2 = Rel(s,t1,t2)
+    let op2 s t1 t2 = Op2(s,t1,t2)
+    let op1 s t1 = Op1(s,t1)
+  end
+
 end
 
 module Params = struct
   type (_,_) t =
     | Nil: (SQL.formula * 'r SQL.result, ('r list, exn) Result.t Deferred.t) t
-    | Cons: 'a Ty.t * ('params,'result) t ->
-      ('a SQL.term -> 'params,'a -> 'result) t
+    | Cons: ('a,'p) Ty.t * ('params,'result) t ->
+      ('p SQL.term -> 'params,'a -> 'result) t
 
   let rec nbarg : type a b. int -> (a,b) t -> int = fun acc l ->
     match l with
@@ -462,6 +484,7 @@ module Params = struct
 
   let e = Nil
   let (@) ty l = Cons(ty,l)
+
 end
 
 module From = struct
