@@ -39,6 +39,22 @@ let populate conn =
           Deferred.unit
     )) authors
 
+let update =
+  update
+    ~from:From.(e)
+    ~param:Params.(Ty.string @ Ty.string @ e)
+    ~update:Author.t
+    SQL.(fun author from_ to_ ->
+        author.(Author.firstname) = from_,
+        [author.(Author.firstname) <- to_])
+
+let update conn =
+  exec_update conn update "bar" "bir"
+  >>= fun nb ->
+  let nb = Result.ok_exn nb in
+  printf "updated: %s\n" (Int63.to_string nb);
+  Deferred.unit
+
 let same_name =
   select
     ~from:From.(Author.t @ Author.t @ e)
@@ -69,6 +85,9 @@ let main () =
   don't_wait_for (
     create_conn () >>= fun conn ->
     populate conn >>=
+    same_name "foo" conn >>=
+    print_names >>= fun () ->
+    update conn >>=
     same_name "foo" conn >>=
     print_names >>= fun () ->
     Table.drop_table conn Author.t >>= fun res ->

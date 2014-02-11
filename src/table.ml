@@ -377,31 +377,38 @@ let add_row = (|>)
 
 module SQL = struct
 
-  type 'table from =
-    | From: 'table table * int -> 'table from
+  type ('table,'kind) from =
+    | From: 'table table * int -> ('table,'kind) from
 
   type rel = string
 
   type 'p term =
-    | Get: 'table from * ('a,'p,'table) column -> 'p term
-    | Param: ('a,'p) Ty.t * int -> 'p term
-    | Op2: rel * 'a term * 'a term -> 'a term
-    | Op1: rel * 'a term -> 'a term
+    | Get: ('table,_) from * (_,'p,'table) column -> 'p term
+    | Param: (_,'p) Ty.t * int -> 'p term
+    | Op2: rel * 'p term * 'p term -> 'p term
+    | Op1: rel * 'p term -> 'p term
 
   type formula =
     | And: formula * formula -> formula
     | Or: formula * formula -> formula
     | Not: formula -> formula
-    | Rel: rel * 'a term * 'a term -> formula
+    | Rel: rel * 'p term * 'p term -> formula
+
+  type modify =
+    | Modify: ('table,[`UPDATED]) from * ('a,'p,'table) column * 'p term
+      -> modify
 
   module Array = struct
-    let get: 'table from -> ('a,'p,'table) column -> 'p term =
+    let get: ('table,_) from -> ('a,'p,'table) column -> 'p term =
       fun from col -> Get(from,col)
+    let set from col v = Modify(from,col,v)
+
   end
 
   type _ result =
-    | Row1: 'table from -> ('table row) result
-    | Row2: 'table1 from * 'table2 from -> ('table1 row * 'table2 row) result
+    | Row1: ('table,_) from -> ('table row) result
+    | Row2: ('table1,_) from * ('table2,_) from ->
+      ('table1 row * 'table2 row) result
 
   let string_of_rel x = x
 
@@ -415,23 +422,30 @@ module SQL = struct
     | Row2 (From(t1,i1),From(t2,i2)) ->
       aux i1 b t1.columns; Buffer.add_string b ", "; aux i2 b t2.columns
 
-  let sql_where b formula =
-    let rec sql_term b = function
-      | Get(From(_,i),col) -> Printf.bprintf b "t%i.%s" i col.name
-      | Param(_,i) -> Printf.bprintf b "$%i" (i+1)
-      | Op2(s,t1,t2) -> Printf.bprintf b "(%a %s %a)" sql_term t1 s sql_term t2
-      | Op1(s,t1) -> Printf.bprintf b "(%s %a)" s sql_term t1
+  let rec sql_term b = function
+    | Get(From(_,i),col) -> Printf.bprintf b "t%i.%s" i col.name
+    | Param(_,i) -> Printf.bprintf b "$%i" (i+1)
+    | Op2(s,t1,t2) -> Printf.bprintf b "(%a %s %a)" sql_term t1 s sql_term t2
+    | Op1(s,t1) -> Printf.bprintf b "(%s %a)" s sql_term t1
+
+  let rec sql_formula b = function
+    | And(f1,f2) ->
+      Printf.bprintf b "(%a and %a)" sql_formula f1 sql_formula f2
+    | Or(f1,f2) ->
+      Printf.bprintf b "(%a or %a)" sql_formula f1 sql_formula f2
+    | Not f1->
+      Printf.bprintf b "(not %a)" sql_formula f1
+    | Rel(rel,t1,t2) -> Printf.bprintf b "%a %s %a"
+                          sql_term t1 (string_of_rel rel) sql_term t2
+
+  let sql_where b formula = sql_formula b formula
+
+  let sql_modify b l =
+    let f = function
+      | Modify(_,col,term) ->
+        Printf.bprintf b "%s = %a" col.name sql_term term
     in
-    let rec sql_formula b = function
-      | And(f1,f2) ->
-        Printf.bprintf b "(%a and %a)" sql_formula f1 sql_formula f2
-      | Or(f1,f2) ->
-        Printf.bprintf b "(%a or %a)" sql_formula f1 sql_formula f2
-      | Not f1->
-        Printf.bprintf b "(not %a)" sql_formula f1
-      | Rel(rel,t1,t2) -> Printf.bprintf b "%a %s %a"
-                            sql_term t1 (string_of_rel rel) sql_term t2 in
-    sql_formula b formula
+    List.iter ~f l
 
   let result1 t = Row1(t)
   let result2 t1 t2 = Row2(t1,t2)
@@ -455,13 +469,13 @@ module SQL = struct
   let (land) t1 t2 = Op2("&",t1,t2)
   let (lor) t1 t2 = Op2("|",t1,t2)
   let (lxor) t1 t2 = Op2("#",t1,t2)
-  let (lnot) t1 = Op1("|",t1)
+  let lnot t1 = Op1("|",t1)
   let (lsl) t1 t2 = Op2("<<",t1,t2)
   let (lsr) t1 t2 = Op2(">>",t1,t2)
 
   let (&&) f1 f2 = And(f1,f2)
   let (||) f1 f2 = Or(f1,f2)
-  let (not) f1 = Not f1
+  let not f1 = Not f1
 
   module Build = struct
     let rel s t1 t2 = Rel(s,t1,t2)
@@ -472,12 +486,12 @@ module SQL = struct
 end
 
 module Params = struct
-  type (_,_) t =
-    | Nil: (SQL.formula * 'r SQL.result, ('r list, exn) Result.t Deferred.t) t
-    | Cons: ('a,'p) Ty.t * ('params,'result) t ->
-      ('p SQL.term -> 'params,'a -> 'result) t
+  type ('inner_arg,'outer_arg,'inner_res,'outer_res) t =
+    | Nil: ('inner_res,'outer_res,'inner_res,'outer_res) t
+    | Cons: ('a,'p) Ty.t * ('inner_arg,'outer_arg,'inner_res,'outer_res) t ->
+      ('p SQL.term -> 'inner_arg,'a -> 'outer_arg,'inner_res,'outer_res) t
 
-  let rec nbarg : type a b. int -> (a,b) t -> int = fun acc l ->
+  let rec nbarg : type a b c d. int -> (a,b,c,d) t -> int = fun acc l ->
     match l with
     | Nil -> acc
     | Cons (_,l) -> nbarg (acc+1) l
@@ -491,23 +505,23 @@ module From = struct
   type (_,_) t =
     | Nil: ('params,'params) t
     | Cons: 'table table * ('params,'formula) t ->
-      ('params, 'table SQL.from -> 'formula) t
+      ('params, ('table,[`USED]) SQL.from -> 'formula) t
 
   let e = Nil
   let (@) t l = Cons(t,l)
+
+  let to_sql i b from =
+    let rec aux: type a b. bool -> int -> Buffer.t -> (a,b) t -> unit =
+      fun first i b -> function
+        | Nil -> ()
+        | Cons(table,from) ->
+          Printf.bprintf b "%s %s as t%i"
+            (if first then "From" else ",")
+            (table_name table) i;
+          aux false (i+1) b from in
+    aux true i b from
+
 end
-
-
-type 'result select = Connection.t -> 'result
-
-let compute_request : Buffer.t -> SQL.formula -> 'r SQL.result -> string =
-  fun bfrom formula r ->
-    let b = Buffer.create 20 in
-    Printf.bprintf b "SELECT %a FROM %a WHERE %a;"
-      SQL.sql_result r
-      Buffer.add_buffer bfrom
-      SQL.sql_where formula;
-    Buffer.contents b
 
 let rec foldi f acc max min =
   if min > max then acc else foldi f (f acc max) (max - 1) min
@@ -524,63 +538,108 @@ let extract_result : type r. r SQL.result -> Postgresql.result -> r list =
                                {result; index; offset = nbt1})::acc)
         [] (result#ntuples - 1) 0
 
-
-let select: type params formula result.
-  from:(params,formula) From.t ->
-  param:(params,result) Params.t ->
-  formula ->
-  result select =
-
-  let rec doparam: type params result.
-    Buffer.t -> (** list of from " ... as ...,  ..." *)
-    (params,result) Params.t ->
-    int -> (** number of previous argument *)
-    params ->
-    (Connection.t -> string Array.t -> result) (** total number of argument *)
-    = fun bfrom params iparam formula ->
+let rec doparam:
+  type inner_arg outer_arg inner_res outer_res.
+  compute_request:(inner_res -> Connection.t -> string Array.t -> outer_res) ->
+  (inner_arg,outer_arg,inner_res,outer_res) Params.t ->
+  int -> (** number of previous argument *)
+  inner_arg ->
+  Connection.t -> string Array.t -> outer_arg
+  = fun ~compute_request params iparam formula ->
     match params with
-    | Params.Nil ->
-      let where, result = formula in
-      let request = compute_request bfrom where result in
+    | Params.Nil -> compute_request formula
+    | Params.Cons(ty,params) ->
+      let call =
+        doparam ~compute_request params
+          (iparam+1) (formula (SQL.Param(ty,iparam))) in
+      (fun conn array ->
+         (fun x ->
+            array.(iparam) <- (ty.sql_of_t x);
+            call conn array))
+
+(** print the sql from *)
+let rec dofrom: type inner_arg inner_from outer_arg inner_res outer_res.
+  compute_request:(inner_res -> Connection.t -> string Array.t -> outer_res) ->
+  (inner_arg,inner_from) From.t ->
+  int -> (** index of this from *)
+  (inner_arg,outer_arg, inner_res, outer_res) Params.t ->
+  inner_from ->
+  Connection.t -> outer_arg
+  = fun ~compute_request from ifrom params formula ->
+    match from with
+    | From.Nil ->
+      let call =
+        doparam ~compute_request params 0 formula in
+      let nbarg = Params.nbarg 0 params in
+      (fun conn ->
+         let array = Array.create ~len:nbarg "" in
+         call conn array)
+    | From.Cons(table,from) ->
+      dofrom ~compute_request
+        from (ifrom+1) params (formula (SQL.From (table,ifrom)))
+
+let select: type inner_arg inner_from outer_arg r.
+  from:(inner_arg,inner_from) From.t ->
+  param:(inner_arg,outer_arg,
+         SQL.formula * r SQL.result,
+         (r list) exn_ret_defer) Params.t ->
+  inner_from ->
+  Connection.t -> outer_arg
+  = fun ~from ~param formula ->
+    let compute_request (formula,result) =
+      let request =
+        let b = Buffer.create 20 in
+        Printf.bprintf b "SELECT %a %a WHERE %a;"
+          SQL.sql_result result
+          (From.to_sql 0) from
+          SQL.sql_where formula;
+        Buffer.contents b in
       fun conn array ->
         Connection.exec conn
           ~expect:[Postgresql.Tuples_ok]
           ~params:array
           request
-          (fun res ->
-            Deferred.return (extract_result result res))
-    | Params.Cons(ty,params) ->
-      let call =
-        doparam bfrom params (iparam+1) (formula (SQL.Param(ty,iparam))) in
-      (fun conn array ->
-         (fun x ->
-            array.(iparam) <- (ty.sql_of_t x);
-            call conn array))
-  in
+          (fun res -> Deferred.return (extract_result result res))
+    in
+    dofrom ~compute_request from 0 param formula
 
-  let rec dofrom: type params formula result.
-    (params,formula) From.t ->
-    Buffer.t -> (** list of from " ... as ...,  ..." *)
-    int -> (** index of this from *)
-    (params,result) Params.t ->
-    formula ->
-    result select
-    = fun from bfrom ifrom params formula ->
-      match from with
-      | From.Nil ->
-        let call = doparam bfrom params 0 formula in
-        let nbarg = Params.nbarg 0 params in
-        (fun conn ->
-           let array = Array.create ~len:nbarg "" in
-           call conn array)
-      | From.Cons(table,from) ->
-        Printf.bprintf bfrom "%s as t%i%s" (table_name table) ifrom
-          (match from with From.Nil -> "" | From.Cons _ -> ", ");
-        dofrom from bfrom (ifrom+1) params (formula (SQL.From (table,ifrom)))
-  in
-
-  fun ~from ~param formula ->
-  dofrom from (Buffer.create 20) 0 param formula
+type 'result select = Connection.t -> 'result
 
 let exec_select = (|>)
 
+type 'result update = Connection.t -> 'result
+
+let update:
+  type inner_arg inner_from outer_arg table'.
+  from:(inner_arg,inner_from) From.t ->
+  param:(inner_arg,outer_arg,
+         SQL.formula * SQL.modify list,
+         Int63.t exn_ret_defer) Params.t ->
+  update:table' table ->
+  ((table',[`UPDATED]) SQL.from -> inner_from) ->
+  Connection.t ->
+  outer_arg
+  = fun ~from ~param ~update formula ->
+    let compute_request (formula,modify) =
+      let request =
+        let b = Buffer.create 20 in
+        Printf.bprintf b "UPDATE %s as t%i SET %a %a WHERE %a;"
+          (table_name update) 0
+          SQL.sql_modify modify
+          (From.to_sql 1) from
+          SQL.sql_where formula;
+        Buffer.contents b in
+      fun conn array ->
+        Connection.exec conn
+          ~expect:[Postgresql.Command_ok]
+          ~params:array
+          request
+          (fun res ->
+             assert (res#ntuples = 0 && res#nfields = 0);
+             Deferred.return (Int63.of_string res#cmd_tuples))
+    in
+    let formula = formula (SQL.From (update,0)) in
+    dofrom ~compute_request from 1 param formula
+
+
+let exec_update = (|>)

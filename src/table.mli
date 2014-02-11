@@ -79,6 +79,7 @@ type 'a exn_ret_defer = ('a, exn) Result.t Deferred.t
 module Ty: sig
 
   type ('a,'p) t
+  (** 'a is the ocaml type and 'p is the postgresql type *)
 
   module MkSexp (S:Sexpable.S): sig
     val t: (S.t,[`SEXP]) t
@@ -146,12 +147,16 @@ val get: ('a,_,'table) column -> 'table row -> 'a
 
 module SQL: sig
 
-  type 'table from
+  type ('table,'kind) from
   type 'a term
   type formula
+  type modify
 
   module Array: sig
-    val get: 'table from -> ('a,'p,'table) column -> 'p term
+    val get: ('table,_) from -> ('a,'p,'table) column -> 'p term
+    val set:
+      ('table,[`UPDATED]) from ->
+      ('a,'p,'table) column -> 'p term -> modify
   end
 
   (** comparison operator are implemented for all relevant datatype
@@ -189,9 +194,9 @@ module SQL: sig
 
   type 'r result
 
-  val result1: 'table from -> ('table row) result
+  val result1: ('table,_) from -> ('table row) result
   val result2:
-    'table1 from -> 'table2 from ->
+    ('table1,_) from -> ('table2,_) from ->
     ('table1 row * 'table2 row) result
 
   module Build: sig
@@ -202,35 +207,60 @@ module SQL: sig
 end
 
 module Params : sig
-  type ('params,'result) t
+  type ('inner_arg,'outer_arg,'inner_res,'outer_res) t
 
-  val e:
-    (SQL.formula * 'r SQL.result, ('r list) exn_ret_defer) t
+  val e: ('inner_res,'outer_res,'inner_res,'outer_res) t
   val (@):
-    ('a,'p) Ty.t -> ('params,'result) t ->
-    ('p SQL.term -> 'params,'a -> 'result) t
+    ('a,'p) Ty.t ->
+    ('inner_arg,'outer_arg,'inner_res,'outer_res) t ->
+    ('p SQL.term -> 'inner_arg,'a -> 'outer_arg,'inner_res,'outer_res) t
 end
 
-module From : sig
-  type ('params,'formula) t
+    (* (SQL.formula * 'r SQL.result, ('r list) exn_ret_defer) t *)
 
-  val e: ('params,'params) t
+
+module From : sig
+  type ('inner_arg,'inner_from) t
+
+  val e: ('inner_arg,'inner_arg) t
   val (@):
-    'table table -> ('params,'formula) t ->
-    ('params, 'table SQL.from -> 'formula) t
+    'table table ->
+    ('inner_arg,'inner_from) t ->
+    ('inner_arg, ('table,[`USED]) SQL.from -> 'inner_from) t
 end
 
 
 type 'a select
 
 val select:
-  from:('params,'formula) From.t ->
-  param:('params,'result) Params.t ->
-  'formula ->
-  'result select
+  from:('inner_arg,'inner_from) From.t ->
+  param:('inner_arg,'outer_arg,
+         SQL.formula * 'r SQL.result,
+         ('r list) exn_ret_defer) Params.t ->
+  'inner_from ->
+  'outer_arg select
 
 val exec_select:
   Connection.t ->
-  'result select ->
-  'result (** 'result is always of the form:
-              param1 -> param2 -> ... -> ('r list) exn_ret_defer *)
+  'outer_arg select ->
+  'outer_arg (** 'result is always of the form:
+                 param1 -> param2 -> ... -> ('r list) exn_ret_defer *)
+
+type 'a update
+
+val update:
+  from:('inner_arg,'inner_from) From.t ->
+  param:('inner_arg,'outer_arg,
+         SQL.formula * SQL.modify list,
+         Int63.t exn_ret_defer) Params.t ->
+  update:'table table ->
+  (('table,[`UPDATED]) SQL.from -> 'inner_from) ->
+  'outer_arg update
+
+val exec_update:
+  Connection.t ->
+  'outer_arg update ->
+  'outer_arg (** 'result is always of the form:
+                 param1 -> param2 -> ... -> Int63.t exn_ret_defer
+                 return the number of modified row *)
+
