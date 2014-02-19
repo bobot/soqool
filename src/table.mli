@@ -54,7 +54,7 @@ type 'table table
 (** It contains typed columns, ocaml type and postgresql type *)
 type ('a,'p,'table) column
 
-(** The result of a query: a raw of the table ['table] *)
+(** The result of a query: a row of the table ['table] *)
 type 'table row
 
 (** A row can be added using *)
@@ -194,8 +194,8 @@ module SQL: sig
 
   type 'r result
 
-  val result1: ('table,_) from -> ('table row) result
-  val result2:
+  val return1: ('table,_) from -> ('table row) result
+  val return2:
     ('table1,_) from -> ('table2,_) from ->
     ('table1 row * 'table2 row) result
 
@@ -209,7 +209,7 @@ end
 module Params : sig
   type ('inner_arg,'outer_arg,'inner_res,'outer_res) t
 
-  val e: ('inner_res,'outer_res,'inner_res,'outer_res) t
+  val nil: ('inner_res,'outer_res,'inner_res,'outer_res) t
   val (@):
     ('a,'p) Ty.t ->
     ('inner_arg,'outer_arg,'inner_res,'outer_res) t ->
@@ -222,7 +222,7 @@ end
 module From : sig
   type ('inner_arg,'inner_from) t
 
-  val e: ('inner_arg,'inner_arg) t
+  val nil: ('inner_arg,'inner_arg) t
   val (@):
     'table table ->
     ('inner_arg,'inner_from) t ->

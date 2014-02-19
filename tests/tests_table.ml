@@ -41,8 +41,8 @@ let populate conn =
 
 let update =
   update
-    ~from:From.(e)
-    ~param:Params.(Ty.string @ Ty.string @ e)
+    ~from:From.(nil)
+    ~param:Params.(Ty.string @ Ty.string @ nil)
     ~update:Author.t
     SQL.(fun author from_ to_ ->
         author.(Author.firstname) = from_,
@@ -57,13 +57,13 @@ let update conn =
 
 let same_name =
   select
-    ~from:From.(Author.t @ Author.t @ e)
-    ~param:Params.(Ty.string @ e)
+    ~from:From.(Author.t @ Author.t @ nil)
+    ~param:Params.(Ty.string @ nil)
     SQL.(fun author1 author2 name ->
         author1.(Author.name) = name &&
         author2.(Author.name) = name &&
         author1.(Author.id) < author2.(Author.id),
-        result2 author1 author2)
+        return2 author1 author2)
 
 let same_name name conn () =
   exec_select conn same_name name

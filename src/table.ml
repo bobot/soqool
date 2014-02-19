@@ -447,8 +447,8 @@ module SQL = struct
     in
     List.iter ~f l
 
-  let result1 t = Row1(t)
-  let result2 t1 t2 = Row2(t1,t2)
+  let return1 t = Row1(t)
+  let return2 t1 t2 = Row2(t1,t2)
 
 
   let (=)  t1 t2 = Rel("=",t1,t2)
@@ -496,7 +496,7 @@ module Params = struct
     | Nil -> acc
     | Cons (_,l) -> nbarg (acc+1) l
 
-  let e = Nil
+  let nil = Nil
   let (@) ty l = Cons(ty,l)
 
 end
@@ -507,7 +507,7 @@ module From = struct
     | Cons: 'table table * ('params,'formula) t ->
       ('params, ('table,[`USED]) SQL.from -> 'formula) t
 
-  let e = Nil
+  let nil = Nil
   let (@) t l = Cons(t,l)
 
   let to_sql i b from =
