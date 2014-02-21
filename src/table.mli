@@ -192,18 +192,36 @@ module SQL: sig
   val (||): formula -> formula -> formula
   val not: formula -> formula
 
-  type 'r result
-
-  val return1: ('table,_) from -> ('table row) result
-  val return2:
-    ('table1,_) from -> ('table2,_) from ->
-    ('table1 row * 'table2 row) result
-
   module Build: sig
     val rel: string -> 'a term -> 'a term -> formula
     val op2: string -> 'a term -> 'a term -> 'a term
     val op1: string -> 'a term -> 'a term
   end
+
+  module Return: sig
+
+    type 'r t
+    type 'a value
+
+    module Array: sig
+      val get: ('table,_) from -> ('a,'p,'table) column -> 'a value
+    end
+
+    type ('arg,'res) ft
+    val nil: ('res,'res) ft
+    val (@) : 'a value -> ('arg, 'res) ft -> ('a -> 'arg, 'res) ft
+    val (@.): ('table,_) from -> ('arg, 'res) ft
+      -> ('table row -> 'arg, 'res) ft
+
+    val return: 'a -> ('a,'b) ft -> 'b t
+
+  end
+
+  val return1: ('table,_) from -> ('table row) Return.t
+  val return2:
+    ('table1,_) from -> ('table2,_) from ->
+    ('table1 row * 'table2 row) Return.t
+
 end
 
 module Params : sig
@@ -235,7 +253,7 @@ type 'a select
 val select:
   from:('inner_arg,'inner_from) From.t ->
   param:('inner_arg,'outer_arg,
-         SQL.formula * 'r SQL.result,
+         SQL.formula * 'r SQL.Return.t,
          ('r list) exn_ret_defer) Params.t ->
   'inner_from ->
   'outer_arg select

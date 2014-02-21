@@ -405,22 +405,7 @@ module SQL = struct
 
   end
 
-  type _ result =
-    | Row1: ('table,_) from -> ('table row) result
-    | Row2: ('table1,_) from * ('table2,_) from ->
-      ('table1 row * 'table2 row) result
-
   let string_of_rel x = x
-
-  let sql_result: type r. Buffer.t -> r result -> unit = fun b result ->
-    let rec aux i b = function
-      | Nil -> ()
-      | Cons(col,Nil) -> Printf.bprintf b "t%i.%s" i col.name
-      | Cons(col,l) -> Printf.bprintf b "t%i.%s, " i col.name; aux i b l in
-    match result with
-    | Row1 (From(t1,i)) -> aux i b t1.columns
-    | Row2 (From(t1,i1),From(t2,i2)) ->
-      aux i1 b t1.columns; Buffer.add_string b ", "; aux i2 b t2.columns
 
   let rec sql_term b = function
     | Get(From(_,i),col) -> Printf.bprintf b "t%i.%s" i col.name
@@ -446,10 +431,6 @@ module SQL = struct
         Printf.bprintf b "%s = %a" col.name sql_term term
     in
     List.iter ~f l
-
-  let return1 t = Row1(t)
-  let return2 t1 t2 = Row2(t1,t2)
-
 
   let (=)  t1 t2 = Rel("=",t1,t2)
   let (<)  t1 t2 = Rel("<",t1,t2)
@@ -482,6 +463,64 @@ module SQL = struct
     let op2 s t1 t2 = Op2(s,t1,t2)
     let op1 s t1 = Op1(s,t1)
   end
+
+  module Return = struct
+
+    type 'a value =
+      | Get: ('table,_) from * ('a,_,'table) column -> 'a value
+
+    module Array = struct
+      let get: ('table,_) from -> ('a,'p,'table) column -> 'a value =
+        fun from col -> Get(from,col)
+    end
+
+    type ('arg,'res) ft =
+      | Nil: ('res,'res) ft
+      | Row: ('table,_) from  * ('arg, 'res) ft
+        -> ('table row -> 'arg, 'res) ft
+      | Value: 'a value * ('arg, 'res) ft
+        -> ('a -> 'arg, 'res) ft
+
+    type 'res t =
+      | Result: 'a * ('a,'b) ft -> 'b t
+
+    let rec sql_ft: type arg res. Buffer.t -> (arg,res) ft -> unit =
+      fun b result ->
+        let rec sql_row i b : _ columns -> unit = function
+        | Nil -> ()
+        | Cons(col,Nil) -> Printf.bprintf b "t%i.%s"   i col.name
+        | Cons(col,l)   -> Printf.bprintf b "t%i.%s, " i col.name;
+          sql_row i b l
+        in
+        let print_comma : type arg res. Buffer.t -> (arg,res) ft -> unit =
+          fun b -> function
+            | Nil     -> ()
+            | Row _   -> Buffer.add_string b ", "
+            | Value _ -> Buffer.add_string b ", "
+        in
+        match result with
+        | Nil -> ()
+        | Row(From(t,i),l) ->
+          sql_row i b t.columns; print_comma b l; sql_ft b l
+        | Value(Get(From(_,i),col),l) ->
+          Printf.bprintf b "t%i.%s, " i col.name;
+          print_comma b l;
+          sql_ft b l
+
+    let sql_result: type r. Buffer.t -> r t -> unit = fun b -> function
+      | Result (_,ft) -> sql_ft b ft
+
+    let return f ft = Result(f,ft)
+    let (@)  v l  = Value(v,l)
+    let (@.) f l  = Row(f,l)
+    let nil = Nil
+  end
+
+  let return1 t =
+    Return.(return (fun x -> x) (t @. nil))
+  let return2 t1 t2 =
+    Return.(return (fun x y -> x,y) (t1 @. t2 @. nil))
+
 
 end
 
@@ -526,16 +565,30 @@ end
 let rec foldi f acc max min =
   if min > max then acc else foldi f (f acc max) (max - 1) min
 
-let extract_result : type r. r SQL.result -> Postgresql.result -> r list =
+let extract_result : type r. r SQL.Return.t -> Postgresql.result -> r list =
   fun spec result  ->
+    let rec sql_ft: type arg res. arg -> (arg,res) SQL.Return.ft -> offset:int
+      -> (Postgresql.result -> int -> res) =
+        fun f ft ~offset ->
+          match ft with
+          | SQL.Return.Nil -> (fun _ _ -> f)
+          | SQL.Return.Row(SQL.From(t,_),l) ->
+            let nbt = nbcolumns 0 t.columns in
+            fun result index ->
+              sql_ft
+                (f {result; index; offset})
+                l ~offset:(offset + nbt)
+                result index
+          | SQL.Return.Value(SQL.Return.Get(_,col),l) ->
+            fun result index ->
+              sql_ft
+                (f (col.ty.t_of_sql (result#getvalue index offset)))
+                l ~offset:(offset + 1)
+                result index
+      in
     match spec with
-    | SQL.Row1 _ ->
-      foldi (fun acc index -> {result; index; offset = 0}::acc)
-        [] (result#ntuples - 1) 0
-    | SQL.Row2 (SQL.From (t1,_),_) ->
-      let nbt1 = nbcolumns 0 t1.columns in
-      foldi (fun acc index -> ({result; index; offset = 0},
-                               {result; index; offset = nbt1})::acc)
+    | SQL.Return.Result (f,ft) ->
+      foldi (fun acc index -> (sql_ft f ft ~offset:0 result index)::acc)
         [] (result#ntuples - 1) 0
 
 let rec doparam:
@@ -581,7 +634,7 @@ let rec dofrom: type inner_arg inner_from outer_arg inner_res outer_res.
 let select: type inner_arg inner_from outer_arg r.
   from:(inner_arg,inner_from) From.t ->
   param:(inner_arg,outer_arg,
-         SQL.formula * r SQL.result,
+         SQL.formula * r SQL.Return.t,
          (r list) exn_ret_defer) Params.t ->
   inner_from ->
   Connection.t -> outer_arg
@@ -590,7 +643,7 @@ let select: type inner_arg inner_from outer_arg r.
       let request =
         let b = Buffer.create 20 in
         Printf.bprintf b "SELECT %a %a WHERE %a;"
-          SQL.sql_result result
+          SQL.Return.sql_result result
           (From.to_sql 0) from
           SQL.sql_where formula;
         Buffer.contents b in
