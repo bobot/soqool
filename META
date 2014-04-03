@@ -1,0 +1,7 @@
+version = "0.1"
+description = "soqool - high level typed interface for postgresql"
+requires = "async fileutils core bin_prot sexplib postgresql"
+archive(byte) = "soqool.cma"
+archive(byte, plugin) = "soqool.cma"
+archive(native) = "soqool.cmxa"
+archive(native, plugin) = "soqool.cmxs"

@@ -2,7 +2,7 @@
 
 PACKAGES=async fileutils core.syntax camlp4 bin_prot.syntax sexplib.syntax postgresql csv
 # I don't understand warning 18
-OPTIONS=-tag annot -no-sanitize -tag debug -use-ocamlfind -cflags -w,+a-4-9-18-41-30-42-44 -cflags -warn-error,+5+10+8+12+20+11 -tag strict_sequence -cflag -bin-annot -j 8 -tag thread -syntax camlp4o
+OPTIONS=-tag annot -no-sanitize -tag debug -use-ocamlfind -cflags -w,+a-4-9-18-41-30-42-44 -cflags -warn-error,+5+10+8+12+20+11 -tag strict_sequence -cflag -bin-annot -j 8 -tag thread -syntax camlp4o -no-links
 #OPTIONS += -cflags -warn-error,+a
 DIRECTORIES=src tests
 OCAMLBUILD=ocamlbuild \
@@ -12,10 +12,21 @@ OCAMLBUILD=ocamlbuild \
 
 .PHONY: tests monitor.native tests_table.native tests_table.byte tests_api tests
 
-all: .merlin tests_table.native
+LIB=lib/soqool.cma lib/soqool.cmxa lib/soqool.cmxs lib/soqool.a lib/table.cmi
+
+all: .merlin $(LIB) tests_table.native
+
+.PHONY: force
+
+lib/%: force
+	@mkdir -p lib
+	@echo build $@
+	@$(OCAMLBUILD) src/$*
+	@cp -a _build/src/$* $@
 
 tests_table.native:
-	$(OCAMLBUILD) tests/tests_table.native
+	@echo build $@
+	@$(OCAMLBUILD) tests/tests_table.native
 
 tests: tests/lahman2012/ tests_table.native
 	./tests_table.native
@@ -46,6 +57,15 @@ dep:
 
 clean:
 	ocamlbuild -clean
+
+.PHONY: install uninstall
+
+install:
+	ocamlfind remove soqool
+	ocamlfind install soqool META $(LIB)
+
+uninstall:
+	ocamlfind remove soqool
 
 .merlin: Makefile
 	@rm -f .merlin.tmp
