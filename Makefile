@@ -28,6 +28,9 @@ tests_table.native:
 	@echo build $@
 	@$(OCAMLBUILD) tests/tests_table.native
 
+doc:
+	$(OCAMLBUILD) soqool.docdir/index.html
+
 tests: tests/lahman2012/ tests_table.native
 	./tests_table.native
 

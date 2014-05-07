@@ -20,10 +20,12 @@
 (*                                                                        *)
 (**************************************************************************)
 
+(** Table API *)
+
 open Core.Std
 open Async.Std
 
-(** {2 connection} *)
+(** {2 Connection} *)
 module Connection: sig
   type t
 
@@ -40,12 +42,17 @@ module Connection: sig
     ?requiressl : string ->  (** Default: none *)
     ?conninfo : string ->    (** Default: none *)
     unit -> (t,exn) Result.t Deferred.t
+  (** create a database connection *)
+
 
   val close: t -> (unit,exn) Result.t Deferred.t
+  (** close a database connection *)
 
 end
 
-(** {2 Table, Column} *)
+(** {2 Table, columns, rows}
+    Columns and rows are statically associated to a unique table.
+ *)
 
 (** A table is associated to a unique type ['table].
     The row of the table represent a type 'r *)
