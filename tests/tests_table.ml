@@ -1,7 +1,7 @@
 
 open Core.Std
 open Async.Std
-open Table
+open Soqool
 
 let verbose = true
 
@@ -12,8 +12,8 @@ module Author = struct
     end)
 
   let uc   = T.uc
-  let name, uc = T.add_column ~name:"name" Ty.string uc
-  let firstname, uc = T.add_column ~name:"firstname" Ty.string uc
+  let name, uc = T.add_column ~name:"name" SQL.Ty.string uc
+  let firstname, uc = T.add_column ~name:"firstname" SQL.Ty.string uc
 
   let t, add, id = T.close uc
 end
@@ -35,7 +35,7 @@ let populate conn =
       add_row conn Author.add name firstname
         >>= (fun id ->
           let id = Result.ok_exn id in
-          printf "%s\n" (Id.to_string id);
+          printf "%s\n" (RowId.to_string id);
           Deferred.unit
     )) authors
 
@@ -74,11 +74,15 @@ let same_name name conn () =
 let print_names l =
   printf "print_names:\n";
   List.iter l ~f:(fun (res1,res2) ->
-      assert (String.equal (get Author.name res1) (get Author.name res2));
+      assert (String.equal
+                (row_get Author.name res1)
+                (row_get Author.name res2));
       printf "%s: %s(%s) --- %s(%s)\n"
-        (get Author.name res1)
-        (get Author.firstname res1) (Id.to_string (get Author.id res1))
-        (get Author.firstname res2) (Id.to_string (get Author.id res2)));
+        (row_get Author.name res1)
+        (row_get Author.firstname res1)
+        (RowId.to_string (row_get Author.id res1))
+        (row_get Author.firstname res2)
+        (RowId.to_string (row_get Author.id res2)));
   Deferred.unit
 
 let main () =
@@ -90,7 +94,7 @@ let main () =
     update conn >>=
     same_name "foo" conn >>=
     print_names >>= fun () ->
-    Table.drop_table conn Author.t >>= fun res ->
+    drop_table conn Author.t >>= fun res ->
     let () = Result.ok_exn res in
     Shutdown.exit 0)
 

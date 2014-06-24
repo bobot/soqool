@@ -10,23 +10,30 @@ OCAMLBUILD=ocamlbuild \
 		 $(OPTIONS)	\
 		 $(addprefix -I ,$(DIRECTORIES)) \
 
-.PHONY: tests monitor.native tests_table.native tests_table.byte tests_api tests
+.PHONY: tests tests_table.native tests_table.byte tests_api tests
 
-LIB=lib/soqool.cma lib/soqool.cmxa lib/soqool.cmxs lib/soqool.a lib/table.cmi
+LIB=soqool.cma soqool.cmxa soqool.cmxs soqool.a	\
+    soqool.cmi soqool_core.cmi soqool_poly.cmi	\
+    soqool_ty.cmi soqool_sql.cmi
 
-all: .merlin $(LIB) tests_table.native
+all: .merlin lib/soqool.timestamp tests_table.native
 
 .PHONY: force
 
-lib/%: force
-	@mkdir -p lib
-	@echo build $@
-	@$(OCAMLBUILD) src/$*
-	@cp -a _build/src/$* $@
+lib/soqool.timestamp: force
+	@mkdir -p lib/soqool
+	@echo build soqool lib
+	@$(OCAMLBUILD) $(addprefix src/, $(LIB))
+	@tar c -C _build/src $(LIB) | tar x -C lib/soqool
+	@cp -a META lib/soqool
+	@touch $@
 
-tests_table.native:
+
+tests_table.native: DIRECTORIES=tests
+
+tests_table.native: lib/soqool.timestamp
 	@echo build $@
-	@$(OCAMLBUILD) tests/tests_table.native
+	@OCAMLPATH=$(PWD)/lib $(OCAMLBUILD) -package soqool tests/tests_table.native
 
 doc:
 	$(OCAMLBUILD) soqool.docdir/index.html

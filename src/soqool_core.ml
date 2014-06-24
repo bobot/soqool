@@ -77,8 +77,8 @@ module Connection : sig
     ?expect : Postgresql.result_status list ->
     ?params : string array ->
     ?binary_params : bool array -> string ->
-    (Postgresql.result -> 'a Async_core.Deferred.t) ->
-    ('a, exn) Core.Std.Result.t Async_core.Deferred.t
+    (Postgresql.result -> 'a Deferred.t) ->
+    ('a, exn) Core.Std.Result.t Deferred.t
 
 end
  = struct
@@ -169,10 +169,10 @@ and 'add adder = Connection.t -> 'add
 
 and 'rt columns =
   | Nil
-  | Cons: ('a,'p,'rt) column * 'rt columns -> 'rt columns
+  | Cons: ('a,'rt) column * 'rt columns -> 'rt columns
 
-and ('a,'p,'rt) column = {
-  ty  : ('a,'p) ty;
+and ('a,'rt) column = {
+  ty  : 'a ty;
   name: string;
   index: int;
   constraints: col_constr list;
@@ -188,7 +188,7 @@ and 'a kind =
   | Data: Postgresql.ftype -> 'a kind
   | Foreign_key: 'table table -> Int63.t kind (** or primary key *)
 
-and ('a,'p) ty = {
+and 'a ty = {
   kind: 'a kind;
   sql_of_t: 'a -> string;
   t_of_sql: string -> 'a;
@@ -200,7 +200,7 @@ let rec nbcolumns acc = function
 
 module Ty = struct
 
-  type ('a,'p) t = ('a,'p) ty
+  type 'a t = 'a ty
 
   (** TODO binary format *)
 
@@ -214,26 +214,15 @@ module Ty = struct
     let t = from_sexp S.sexp_of_t S.t_of_sexp
   end
 
-  let int32 = { kind = Data Postgresql.INT4;
-                           sql_of_t = Int32.to_string;
-                           t_of_sql = Int32.of_string }
-  let int64 = { kind = Data Postgresql.INT8;
-                           sql_of_t = Int64.to_string;
-                           t_of_sql = Int64.of_string }
-  let int63 = { kind = Data Postgresql.INT8;
-                           sql_of_t = Int63.to_string;
-                           t_of_sql = Int63.of_string }
-  let int = { kind = Data Postgresql.INT8;
-                     sql_of_t = Int.to_string;
-                     t_of_sql = Int.of_string }
-  let string = { kind = Data Postgresql.TEXT;
-                           sql_of_t = (fun x -> x);
-                           t_of_sql = (fun x -> x)
-                         }
-  let float = { kind = Data Postgresql.FLOAT8;
-                         sql_of_t = Float.to_string;
-                         t_of_sql = Float.of_string;
-                       }
+  module Obj = struct
+    let mk_with_string kind sql_of_t t_of_sql = {
+      kind = Data kind;
+      sql_of_t;
+      t_of_sql;
+    }
+
+  end
+
 
   let id table = { kind = Foreign_key table;
                    sql_of_t = Int63.to_string;
@@ -251,7 +240,7 @@ module MkTable(X:sig val name:string val version:int end) = struct
 
   type ('add,'res) uc =
     | Nil: ('add,'add) uc
-    | Cons: ('a,'p) ty * ('add,'a -> 'res)  uc -> ('add,'res) uc
+    | Cons: 'a ty * ('add,'a -> 'res)  uc -> ('add,'res) uc
 
   let uc = Nil
 
@@ -285,7 +274,7 @@ module MkTable(X:sig val name:string val version:int end) = struct
 
   let close: type add.
     (add, (t id) exn_ret_defer) uc ->
-    t table * add adder * (t id,[`ID],t) column =
+    t table * add adder * (t id,t) column =
     fun  uc ->
       let columns = rev_columns Nil !columns in
       let len = !index in
@@ -375,7 +364,7 @@ let get column row =
 
 let add_row = (|>)
 
-module SQL = struct
+module Formula = struct
 
   type ('table,'kind) from =
     | From: 'table table * int -> ('table,'kind) from
@@ -383,27 +372,23 @@ module SQL = struct
   type rel = string
 
   type 'p term =
-    | Get: ('table,_) from * (_,'p,'table) column -> 'p term
-    | Param: (_,'p) Ty.t * int -> 'p term
+    | Get: ('table,_) from * (_,'table) column -> 'p term
+    | Param: _ Ty.t * int -> 'p term
     | Op2: rel * 'p term * 'p term -> 'p term
     | Op1: rel * 'p term -> 'p term
 
   type formula =
-    | And: formula * formula -> formula
-    | Or: formula * formula -> formula
-    | Not: formula -> formula
-    | Rel: rel * 'p term * 'p term -> formula
+    | FOp2: rel * formula * formula -> formula
+    | FOp1: rel * formula -> formula
+    | FRel: rel * 'p term * 'p term -> formula
 
   type modify =
-    | Modify: ('table,[`UPDATED]) from * ('a,'p,'table) column * 'p term
+    | Modify: ('table,[`UPDATED]) from * ('a,'table) column * 'p term
       -> modify
 
-  module Array = struct
-    let get: ('table,_) from -> ('a,'p,'table) column -> 'p term =
-      fun from col -> Get(from,col)
-    let set from col v = Modify(from,col,v)
-
-  end
+  let get_term: ('table,_) from -> ('a,'table) column -> 'p term =
+    fun from col -> Get(from,col)
+  let set_term from col v = Modify(from,col,v)
 
   let string_of_rel x = x
 
@@ -414,13 +399,11 @@ module SQL = struct
     | Op1(s,t1) -> Printf.bprintf b "(%s %a)" s sql_term t1
 
   let rec sql_formula b = function
-    | And(f1,f2) ->
-      Printf.bprintf b "(%a and %a)" sql_formula f1 sql_formula f2
-    | Or(f1,f2) ->
-      Printf.bprintf b "(%a or %a)" sql_formula f1 sql_formula f2
-    | Not f1->
-      Printf.bprintf b "(not %a)" sql_formula f1
-    | Rel(rel,t1,t2) -> Printf.bprintf b "%a %s %a"
+    | FOp2(rel,f1,f2) ->
+      Printf.bprintf b "(%a %s %a)" sql_formula f1 rel sql_formula f2
+    | FOp1(rel,f1)->
+      Printf.bprintf b "(%s %a)" rel sql_formula f1
+    | FRel(rel,t1,t2) -> Printf.bprintf b "%a %s %a"
                           sql_term t1 (string_of_rel rel) sql_term t2
 
   let sql_where b formula = sql_formula b formula
@@ -432,103 +415,75 @@ module SQL = struct
     in
     List.iter ~f l
 
-  let (=)  t1 t2 = Rel("=",t1,t2)
-  let (<)  t1 t2 = Rel("<",t1,t2)
-  let (<=) t1 t2 = Rel("<=",t1,t2)
-  let (>)  t1 t2 = Rel(">",t1,t2)
-  let (>=) t1 t2 = Rel(">=",t1,t2)
-  let (<>) t1 t2 = Rel("<>",t1,t2)
-
-  type 'a num = [< `INT | `FLOAT] as 'a
-  let (+) t1 t2 = Op2("+",t1,t2)
-  let (-) t1 t2 = Op2("-",t1,t2)
-  let ( * ) t1 t2 = Op2("*",t1,t2)
-  let ( ** ) t1 t2 = Op2("^",t1,t2)
-  let (mod) t1 t2 = Op2("%",t1,t2)
-  let (/) t1 t2 = Op2("/",t1,t2)
-
-  let (land) t1 t2 = Op2("&",t1,t2)
-  let (lor) t1 t2 = Op2("|",t1,t2)
-  let (lxor) t1 t2 = Op2("#",t1,t2)
-  let lnot t1 = Op1("|",t1)
-  let (lsl) t1 t2 = Op2("<<",t1,t2)
-  let (lsr) t1 t2 = Op2(">>",t1,t2)
-
-  let (&&) f1 f2 = And(f1,f2)
-  let (||) f1 f2 = Or(f1,f2)
-  let not f1 = Not f1
-
-  module Build = struct
-    let rel s t1 t2 = Rel(s,t1,t2)
+  module Obj = struct
     let op2 s t1 t2 = Op2(s,t1,t2)
     let op1 s t1 = Op1(s,t1)
+
+    let rel s t1 t2 = FRel(s,t1,t2)
+    let fop2 s t1 t2 = FOp2(s,t1,t2)
+    let fop1 s t1 = FOp1(s,t1)
+
   end
 
-  module Return = struct
+end
 
-    type 'a value =
-      | Get: ('table,_) from * ('a,_,'table) column -> 'a value
 
-    module Array = struct
-      let get: ('table,_) from -> ('a,'p,'table) column -> 'a value =
-        fun from col -> Get(from,col)
-    end
+module Return = struct
+  open Formula
 
-    type ('arg,'res) ft =
-      | Nil: ('res,'res) ft
-      | Row: ('table,_) from  * ('arg, 'res) ft
-        -> ('table row -> 'arg, 'res) ft
-      | Value: 'a value * ('arg, 'res) ft
-        -> ('a -> 'arg, 'res) ft
+  type 'a value =
+    | Get: ('table,_) from * ('a,'table) column -> 'a value
 
-    type 'res t =
-      | Result: 'a * ('a,'b) ft -> 'b t
+  let get: ('table,_) from -> ('a,'table) column -> 'a value =
+    fun from col -> Get(from,col)
 
-    let rec sql_ft: type arg res. Buffer.t -> (arg,res) ft -> unit =
-      fun b result ->
-        let rec sql_row i b : _ columns -> unit = function
+  type ('arg,'res) ft =
+    | Nil: ('res,'res) ft
+    | Row: ('table,_) from  * ('arg, 'res) ft
+      -> ('table row -> 'arg, 'res) ft
+    | Value: 'a value * ('arg, 'res) ft
+      -> ('a -> 'arg, 'res) ft
+
+  type 'res t =
+    | Result: 'a * ('a,'b) ft -> 'b t
+
+  let rec sql_ft: type arg res. Buffer.t -> (arg,res) ft -> unit =
+    fun b result ->
+      let rec sql_row i b : _ columns -> unit = function
         | Nil -> ()
         | Cons(col,Nil) -> Printf.bprintf b "t%i.%s"   i col.name
         | Cons(col,l)   -> Printf.bprintf b "t%i.%s, " i col.name;
           sql_row i b l
-        in
-        let print_comma : type arg res. Buffer.t -> (arg,res) ft -> unit =
-          fun b -> function
-            | Nil     -> ()
-            | Row _   -> Buffer.add_string b ", "
-            | Value _ -> Buffer.add_string b ", "
-        in
-        match result with
-        | Nil -> ()
-        | Row(From(t,i),l) ->
-          sql_row i b t.columns; print_comma b l; sql_ft b l
-        | Value(Get(From(_,i),col),l) ->
-          Printf.bprintf b "t%i.%s, " i col.name;
-          print_comma b l;
-          sql_ft b l
+      in
+      let print_comma : type arg res. Buffer.t -> (arg,res) ft -> unit =
+        fun b -> function
+          | Nil     -> ()
+          | Row _   -> Buffer.add_string b ", "
+          | Value _ -> Buffer.add_string b ", "
+      in
+      match result with
+      | Nil -> ()
+      | Row(From(t,i),l) ->
+        sql_row i b t.columns; print_comma b l; sql_ft b l
+      | Value(Get(From(_,i),col),l) ->
+        Printf.bprintf b "t%i.%s, " i col.name;
+        print_comma b l;
+        sql_ft b l
 
-    let sql_result: type r. Buffer.t -> r t -> unit = fun b -> function
-      | Result (_,ft) -> sql_ft b ft
+  let sql_result: type r. Buffer.t -> r t -> unit = fun b -> function
+    | Result (_,ft) -> sql_ft b ft
 
-    let return f ft = Result(f,ft)
-    let (@)  v l  = Value(v,l)
-    let (@.) f l  = Row(f,l)
-    let nil = Nil
-  end
-
-  let return1 t =
-    Return.(return (fun x -> x) (t @. nil))
-  let return2 t1 t2 =
-    Return.(return (fun x y -> x,y) (t1 @. t2 @. nil))
-
-
+  let return ft f = Result(f,ft)
+  let value  v l  = Value(v,l)
+  let row f l  = Row(f,l)
+  let nil = Nil
 end
 
 module Params = struct
   type ('inner_arg,'outer_arg,'inner_res,'outer_res) t =
     | Nil: ('inner_res,'outer_res,'inner_res,'outer_res) t
-    | Cons: ('a,'p) Ty.t * ('inner_arg,'outer_arg,'inner_res,'outer_res) t ->
-      ('p SQL.term -> 'inner_arg,'a -> 'outer_arg,'inner_res,'outer_res) t
+    | Cons: 'a Ty.t * ('inner_arg,'outer_arg,'inner_res,'outer_res) t ->
+      ('p Formula.term -> 'inner_arg,'a -> 'outer_arg,'inner_res,'outer_res) t
 
   let rec nbarg : type a b c d. int -> (a,b,c,d) t -> int = fun acc l ->
     match l with
@@ -536,7 +491,7 @@ module Params = struct
     | Cons (_,l) -> nbarg (acc+1) l
 
   let nil = Nil
-  let (@) ty l = Cons(ty,l)
+  let cons ty l = Cons(ty,l)
 
 end
 
@@ -544,10 +499,10 @@ module From = struct
   type (_,_) t =
     | Nil: ('params,'params) t
     | Cons: 'table table * ('params,'formula) t ->
-      ('params, ('table,[`USED]) SQL.from -> 'formula) t
+      ('params, ('table,[`USED]) Formula.from -> 'formula) t
 
   let nil = Nil
-  let (@) t l = Cons(t,l)
+  let cons t l = Cons(t,l)
 
   let to_sql i b from =
     let rec aux: type a b. bool -> int -> Buffer.t -> (a,b) t -> unit =
@@ -565,21 +520,21 @@ end
 let rec foldi f acc max min =
   if min > max then acc else foldi f (f acc max) (max - 1) min
 
-let extract_result : type r. r SQL.Return.t -> Postgresql.result -> r list =
+let extract_result : type r. r Return.t -> Postgresql.result -> r list =
   fun spec result  ->
-    let rec sql_ft: type arg res. arg -> (arg,res) SQL.Return.ft -> offset:int
+    let rec sql_ft: type arg res. arg -> (arg,res) Return.ft -> offset:int
       -> (Postgresql.result -> int -> res) =
         fun f ft ~offset ->
           match ft with
-          | SQL.Return.Nil -> (fun _ _ -> f)
-          | SQL.Return.Row(SQL.From(t,_),l) ->
+          | Return.Nil -> (fun _ _ -> f)
+          | Return.Row(Formula.From(t,_),l) ->
             let nbt = nbcolumns 0 t.columns in
             fun result index ->
               sql_ft
                 (f {result; index; offset})
                 l ~offset:(offset + nbt)
                 result index
-          | SQL.Return.Value(SQL.Return.Get(_,col),l) ->
+          | Return.Value(Return.Get(_,col),l) ->
             fun result index ->
               sql_ft
                 (f (col.ty.t_of_sql (result#getvalue index offset)))
@@ -587,7 +542,7 @@ let extract_result : type r. r SQL.Return.t -> Postgresql.result -> r list =
                 result index
       in
     match spec with
-    | SQL.Return.Result (f,ft) ->
+    | Return.Result (f,ft) ->
       foldi (fun acc index -> (sql_ft f ft ~offset:0 result index)::acc)
         [] (result#ntuples - 1) 0
 
@@ -604,7 +559,7 @@ let rec doparam:
     | Params.Cons(ty,params) ->
       let call =
         doparam ~compute_request params
-          (iparam+1) (formula (SQL.Param(ty,iparam))) in
+          (iparam+1) (formula (Formula.Param(ty,iparam))) in
       (fun conn array ->
          (fun x ->
             array.(iparam) <- (ty.sql_of_t x);
@@ -629,12 +584,12 @@ let rec dofrom: type inner_arg inner_from outer_arg inner_res outer_res.
          call conn array)
     | From.Cons(table,from) ->
       dofrom ~compute_request
-        from (ifrom+1) params (formula (SQL.From (table,ifrom)))
+        from (ifrom+1) params (formula (Formula.From (table,ifrom)))
 
 let select: type inner_arg inner_from outer_arg r.
   from:(inner_arg,inner_from) From.t ->
   param:(inner_arg,outer_arg,
-         SQL.formula * r SQL.Return.t,
+         Formula.formula * r Return.t,
          (r list) exn_ret_defer) Params.t ->
   inner_from ->
   Connection.t -> outer_arg
@@ -643,9 +598,9 @@ let select: type inner_arg inner_from outer_arg r.
       let request =
         let b = Buffer.create 20 in
         Printf.bprintf b "SELECT %a %a WHERE %a;"
-          SQL.Return.sql_result result
+          Return.sql_result result
           (From.to_sql 0) from
-          SQL.sql_where formula;
+          Formula.sql_where formula;
         Buffer.contents b in
       fun conn array ->
         Connection.exec conn
@@ -666,10 +621,10 @@ let update:
   type inner_arg inner_from outer_arg table'.
   from:(inner_arg,inner_from) From.t ->
   param:(inner_arg,outer_arg,
-         SQL.formula * SQL.modify list,
+         Formula.formula * Formula.modify list,
          Int63.t exn_ret_defer) Params.t ->
   update:table' table ->
-  ((table',[`UPDATED]) SQL.from -> inner_from) ->
+  ((table',[`UPDATED]) Formula.from -> inner_from) ->
   Connection.t ->
   outer_arg
   = fun ~from ~param ~update formula ->
@@ -678,9 +633,9 @@ let update:
         let b = Buffer.create 20 in
         Printf.bprintf b "UPDATE %s as t%i SET %a %a WHERE %a;"
           (table_name update) 0
-          SQL.sql_modify modify
+          Formula.sql_modify modify
           (From.to_sql 1) from
-          SQL.sql_where formula;
+          Formula.sql_where formula;
         Buffer.contents b in
       fun conn array ->
         Connection.exec conn
@@ -691,7 +646,7 @@ let update:
              assert (res#ntuples = 0 && res#nfields = 0);
              Deferred.return (Int63.of_string res#cmd_tuples))
     in
-    let formula = formula (SQL.From (update,0)) in
+    let formula = formula (Formula.From (update,0)) in
     dofrom ~compute_request from 1 param formula
 
 

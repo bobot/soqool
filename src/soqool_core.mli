@@ -48,18 +48,33 @@ module Connection: sig
   val close: t -> (unit,exn) Result.t Deferred.t
   (** close a database connection *)
 
+  val exec:
+    t ->
+    ?expect : Postgresql.result_status list ->
+    ?params : string array ->
+    ?binary_params : bool array -> string ->
+    (Postgresql.result -> 'a Deferred.t) ->
+    ('a, exn) Core.Std.Result.t Deferred.t
+    (**
+       Direct execution of an sql command.
+       Use it when you want to run command not accessible from the API.
+
+       These case are interesting to know. Please report.
+
+       In any case use with care, typing invariant can be broken doing so.
+    *)
+
 end
 
 (** {2 Table, columns, rows}
     Columns and rows are statically associated to a unique table.
  *)
 
-(** A table is associated to a unique type ['table].
-    The row of the table represent a type 'r *)
+(** A table is associated to a unique type ['table] *)
 type 'table table
 
 (** It contains typed columns, ocaml type and postgresql type *)
-type ('a,'p,'table) column
+type ('a,'table) column
 
 (** The result of a query: a row of the table ['table] *)
 type 'table row
@@ -85,26 +100,23 @@ type 'a exn_ret_defer = ('a, exn) Result.t Deferred.t
 
 module Ty: sig
 
-  type ('a,'p) t
-  (** 'a is the ocaml type and 'p is the postgresql type *)
+  type 'a t
+  (** 'a is the ocaml type *)
 
   module MkSexp (S:Sexpable.S): sig
-    val t: (S.t,[`SEXP]) t
+    val t: S.t t
   end
 
-  val from_sexp: ('a-> Sexp.t) -> (Sexp.t -> 'a) -> ('a,[`SEXP]) t
+  val from_sexp: ('a-> Sexp.t) -> (Sexp.t -> 'a) -> 'a t
 
-  (** integral type *)
-  val int: (int,[`INT]) t
-  val int32: (Int32.t,[`INT]) t
-  val int64: (Int64.t,[`INT]) t
-  val int63: (Int63.t,[`INT]) t
-  val string: (string,[`TEXT]) t
+  val id: 'table table -> 'table id t
 
-  (** double precision *)
-  val float: (float,[`FLOAT]) t
-
-  val id: 'table table -> ('table id,[`ID]) t
+  module Obj: sig
+    val mk_with_string:
+      Postgresql.ftype ->
+      ('a -> string) ->
+      (string -> 'a) -> 'a t
+  end
 
 end
 
@@ -122,13 +134,13 @@ module MkTable(X:sig val name:string val version:int end): sig
   val add_column:
     ?constraints: col_constr list -> (* default: [] *)
     name:string ->
-    ('a,'p) Ty.t ->
+    'a Ty.t ->
     ('add, 'a -> 'res) uc ->
-    ('a,'p,t) column * ('add, 'res) uc
+    ('a,t) column * ('add, 'res) uc
 
   val close:
     ('add, (t id) exn_ret_defer) uc ->
-    t table * 'add adder * (t id,[`ID],t) column
+    t table * 'add adder * (t id,t) column
   (** No more column can be added  after calling this function.
       Return the table and the id column of the table *)
 end
@@ -150,108 +162,76 @@ val add_row:
   'add adder ->
   'add (** end by ('table id) exn_ret_defer *)
 
-val get: ('a,_,'table) column -> 'table row -> 'a
+val get: ('a,'table) column -> 'table row -> 'a
 
-module SQL: sig
+module Formula: sig
 
   type ('table,'kind) from
+      (** 'kind is [`UPDATED | `USED] *)
+
   type 'a term
   type formula
   type modify
 
-  module Array: sig
-    val get: ('table,_) from -> ('a,'p,'table) column -> 'p term
-    val set:
-      ('table,[`UPDATED]) from ->
-      ('a,'p,'table) column -> 'p term -> modify
-  end
+  val get_term: ('table,_) from -> ('a,'table) column -> 'a term
+  val set_term: ('table,[`UPDATED]) from ->
+    ('a,'table) column -> 'a term -> modify
 
-  (** comparison operator are implemented for all relevant datatype
-      (I don't know what relevant means)
-      Warning it is the comparison operator of posgresql.
-      It must be the same than ocaml for predefined type in Ty.
-      But certainly not for the one created with Ty.from_sexp
-  *)
-  val (=): 'p term -> 'p term -> formula
-  val (<): 'p term -> 'p term -> formula
-  val (>): 'p term -> 'p term -> formula
-  val (<=): 'p term -> 'p term -> formula
-  val (>=): 'p term -> 'p term -> formula
-  val (<>): 'p term -> 'p term -> formula
+  module Obj: sig
+    (** These functions must be used with the same caution than
+        {!Obj.magic} *)
 
-  type 'a num = [< `INT | `FLOAT] as 'a
-  val (+): 'a num term -> 'a num term -> 'a num term
-  val (-): 'a num term -> 'a num term -> 'a num term
-  val ( * ): 'a num term -> 'a num term -> 'a num term
-  val (mod): 'a num term -> 'a num term -> 'a num term
-  val (/): 'a num term -> 'a num term -> 'a num term
-  val ( ** ): 'a num term -> 'a num term -> 'a num term
-
-  val (lor):  [`INT] term -> [`INT] term -> [`INT] term
-  val (land): [`INT] term -> [`INT] term -> [`INT] term
-  val (lxor): [`INT] term -> [`INT] term -> [`INT] term
-  val lnot: [`INT] term -> [`INT] term
-  val (lsl): [`INT] term -> [`INT] term -> [`INT] term
-  val (lsr): [`INT] term -> [`INT] term -> [`INT] term
-
-
-  val (&&): formula -> formula -> formula
-  val (||): formula -> formula -> formula
-  val not: formula -> formula
-
-  module Build: sig
-    val rel: string -> 'a term -> 'a term -> formula
     val op2: string -> 'a term -> 'a term -> 'a term
     val op1: string -> 'a term -> 'a term
-  end
+    (* val conv: string -> 'a term -> 'b term *)
 
-  module Return: sig
-
-    type 'r t
-    type 'a value
-
-    module Array: sig
-      val get: ('table,_) from -> ('a,'p,'table) column -> 'a value
-    end
-
-    type ('arg,'res) ft
-    val nil: ('res,'res) ft
-    val (@) : 'a value -> ('arg, 'res) ft -> ('a -> 'arg, 'res) ft
-    val (@.): ('table,_) from -> ('arg, 'res) ft
-      -> ('table row -> 'arg, 'res) ft
-
-    val return: 'a -> ('a,'b) ft -> 'b t
+    val fop2: string -> formula -> formula -> formula
+    val fop1: string -> formula -> formula
+    val rel: string -> 'a term -> 'a term -> formula
 
   end
-
-  val return1: ('table,_) from -> ('table row) Return.t
-  val return2:
-    ('table1,_) from -> ('table2,_) from ->
-    ('table1 row * 'table2 row) Return.t
 
 end
+
+module Return: sig
+
+  type 'r t
+  type 'a value
+
+  val get: ('table,_) Formula.from -> ('a,'table) column -> 'a value
+
+  type ('arg,'res) ft
+  val nil: ('res,'res) ft
+  val value : 'a value -> ('arg, 'res) ft -> ('a -> 'arg, 'res) ft
+  val row: ('table,_) Formula.from -> ('arg, 'res) ft
+    -> ('table row -> 'arg, 'res) ft
+
+  val return: ('a,'b) ft -> 'a -> 'b t
+
+end
+
 
 module Params : sig
   type ('inner_arg,'outer_arg,'inner_res,'outer_res) t
 
   val nil: ('inner_res,'outer_res,'inner_res,'outer_res) t
-  val (@):
-    ('a,'p) Ty.t ->
+  val cons:
+    'a Ty.t ->
     ('inner_arg,'outer_arg,'inner_res,'outer_res) t ->
-    ('p SQL.term -> 'inner_arg,'a -> 'outer_arg,'inner_res,'outer_res) t
+    ('p Formula.term -> 'inner_arg,'a -> 'outer_arg,'inner_res,'outer_res) t
 end
 
-    (* (SQL.formula * 'r SQL.result, ('r list) exn_ret_defer) t *)
+(* (SQL.formula * 'r SQL.result, ('r list) exn_ret_defer) t *)
 
 
 module From : sig
   type ('inner_arg,'inner_from) t
 
   val nil: ('inner_arg,'inner_arg) t
-  val (@):
+  val cons:
     'table table ->
     ('inner_arg,'inner_from) t ->
-    ('inner_arg, ('table,[`USED]) SQL.from -> 'inner_from) t
+    ('inner_arg, ('table,[`USED]) Formula.from -> 'inner_from) t
 end
 
 
@@ -260,7 +240,7 @@ type 'a select
 val select:
   from:('inner_arg,'inner_from) From.t ->
   param:('inner_arg,'outer_arg,
-         SQL.formula * 'r SQL.Return.t,
+         Formula.formula * 'r Return.t,
          ('r list) exn_ret_defer) Params.t ->
   'inner_from ->
   'outer_arg select
@@ -276,10 +256,10 @@ type 'a update
 val update:
   from:('inner_arg,'inner_from) From.t ->
   param:('inner_arg,'outer_arg,
-         SQL.formula * SQL.modify list,
+         Formula.formula * Formula.modify list,
          Int63.t exn_ret_defer) Params.t ->
   update:'table table ->
-  (('table,[`UPDATED]) SQL.from -> 'inner_from) ->
+  (('table,[`UPDATED]) Formula.from -> 'inner_from) ->
   'outer_arg update
 
 val exec_update:
